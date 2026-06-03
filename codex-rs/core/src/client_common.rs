@@ -64,6 +64,15 @@ pub struct ResponseStream {
     pub(crate) consumer_dropped: CancellationToken,
 }
 
+impl ResponseStream {
+    pub(crate) fn new(rx_event: mpsc::Receiver<Result<ResponseEvent>>) -> Self {
+        Self {
+            rx_event,
+            consumer_dropped: CancellationToken::new(),
+        }
+    }
+}
+
 impl Stream for ResponseStream {
     type Item = Result<ResponseEvent>;
 

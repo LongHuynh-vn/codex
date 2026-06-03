@@ -108,6 +108,7 @@ fn response_item_records_turn_ttft_for_first_output_signals() {
             namespace: None,
             arguments: "{}".to_string(),
             call_id: "call-1".to_string(),
+            thought_signature: None,
         }
     ));
     assert!(response_item_records_turn_ttft(

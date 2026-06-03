@@ -96,6 +96,7 @@ fn external_context_pollution_items_exclude_local_tool_calls() {
             namespace: None,
             arguments: "{}".to_string(),
             call_id: "call-1".to_string(),
+            thought_signature: None,
         },
         ResponseItem::FunctionCallOutput {
             call_id: "call-1".to_string(),

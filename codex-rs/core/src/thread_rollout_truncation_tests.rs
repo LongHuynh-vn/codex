@@ -70,6 +70,7 @@ fn truncates_rollout_from_start_before_nth_user_only() {
         ResponseItem::FunctionCall {
             id: None,
             call_id: "c1".to_string(),
+            thought_signature: None,
             name: "tool".to_string(),
             namespace: None,
             arguments: "{}".to_string(),

@@ -27,6 +27,7 @@ use codex_login::CodexAuth;
 use codex_login::default_client::default_headers;
 use codex_login::read_openai_api_key_from_env;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -611,6 +612,11 @@ async fn prepare_realtime_start(
     params: ConversationStartParams,
 ) -> CodexResult<PreparedRealtimeConversationStart> {
     let provider = sess.provider().await;
+    if provider.wire_api == WireApi::GeminiNative {
+        return Err(CodexErr::UnsupportedOperation(
+            "Realtime voice is not supported for Gemini Native".to_string(),
+        ));
+    }
     let auth_manager = sess
         .services
         .model_client

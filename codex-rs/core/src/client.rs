@@ -116,6 +116,7 @@ use crate::util::emit_feedback_auth_recovery_tags;
 use codex_api::map_api_error;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
+use codex_gemini_adapter::GeminiPrompt;
 use codex_login::auth_env_telemetry::AuthEnvTelemetry;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_model_provider::SharedModelProvider;
@@ -1339,6 +1340,44 @@ impl ModelClientSession {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(
+        name = "model_client.stream_gemini_native",
+        level = "info",
+        skip_all,
+        fields(
+            model = %model_info.slug,
+            wire_api = %self.client.state.provider.info().wire_api,
+            transport = "gemini_native_sse",
+            http.method = "POST",
+            api.path = "streamGenerateContent"
+        )
+    )]
+    async fn stream_gemini_native(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        _summary: ReasoningSummaryConfig,
+        _service_tier: Option<String>,
+        _turn_metadata_header: Option<&str>,
+        _inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let rx = codex_gemini_adapter::stream_generate_content(
+            build_reqwest_client(),
+            self.client.state.provider.info(),
+            model_info,
+            GeminiPrompt {
+                instructions: prompt.base_instructions.text.clone(),
+                input: prompt.get_formatted_input(),
+                tools: prompt.tools.clone(),
+            },
+            effort,
+        )
+        .await?;
+        Ok(ResponseStream::new(rx))
+    }
+
     /// Streams a turn via the Responses API over WebSocket transport.
     #[allow(clippy::too_many_arguments)]
     #[instrument(
@@ -1600,6 +1639,18 @@ impl ModelClientSession {
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
+            WireApi::GeminiNative => {
+                self.stream_gemini_native(
+                    prompt,
+                    model_info,
+                    effort,
+                    summary,
+                    service_tier,
+                    turn_metadata_header,
+                    inference_trace,
+                )
+                .await
+            }
             WireApi::Responses => {
                 if self.client.responses_websocket_enabled() {
                     let request_trace = current_span_w3c_trace_context();
@@ -1961,6 +2012,8 @@ impl AuthRequestTelemetryContext {
                 AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens | AuthMode::AgentIdentity => {
                     "Chatgpt"
                 }
+                AuthMode::GeminiApiKey => "GeminiApiKey",
+                AuthMode::GeminiVertexAdc => "GeminiVertexAdc",
             }),
             auth_header_attached: auth_telemetry.attached,
             auth_header_name: auth_telemetry.name,

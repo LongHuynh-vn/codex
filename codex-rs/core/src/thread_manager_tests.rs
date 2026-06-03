@@ -83,6 +83,7 @@ fn truncates_before_requested_user_message() {
         ResponseItem::FunctionCall {
             id: None,
             call_id: "c1".to_string(),
+            thought_signature: None,
             name: "tool".to_string(),
             namespace: None,
             arguments: "{}".to_string(),

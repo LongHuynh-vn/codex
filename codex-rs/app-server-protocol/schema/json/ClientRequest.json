@@ -2229,6 +2229,12 @@
                 "null"
               ]
             },
+            "thought_signature": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "function_call"

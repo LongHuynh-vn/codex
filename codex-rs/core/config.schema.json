@@ -4331,6 +4331,13 @@
             "responses"
           ],
           "type": "string"
+        },
+        {
+          "description": "Google Gemini native `generateContent` API.",
+          "enum": [
+            "gemini_native"
+          ],
+          "type": "string"
         }
       ]
     },

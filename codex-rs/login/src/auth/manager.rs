@@ -237,6 +237,9 @@ impl CodexAuth {
             }
             ApiAuthMode::ApiKey => unreachable!("api key mode is handled above"),
             ApiAuthMode::AgentIdentity => unreachable!("agent identity mode is handled above"),
+            ApiAuthMode::GeminiApiKey | ApiAuthMode::GeminiVertexAdc => Err(std::io::Error::other(
+                "Gemini auth is resolved from provider configuration, not auth.json.",
+            )),
         }
     }
 
@@ -634,13 +637,17 @@ pub async fn enforce_login_restrictions(config: &AuthConfig) -> std::io::Result<
             (ForcedLoginMethod::Chatgpt, AuthMode::Chatgpt)
             | (ForcedLoginMethod::Chatgpt, AuthMode::ChatgptAuthTokens)
             | (ForcedLoginMethod::Chatgpt, AuthMode::AgentIdentity) => None,
+            (ForcedLoginMethod::Api, AuthMode::GeminiApiKey | AuthMode::GeminiVertexAdc) => None,
             (ForcedLoginMethod::Api, AuthMode::Chatgpt)
             | (ForcedLoginMethod::Api, AuthMode::ChatgptAuthTokens)
             | (ForcedLoginMethod::Api, AuthMode::AgentIdentity) => Some(
                 "API key login is required, but ChatGPT is currently being used. Logging out."
                     .to_string(),
             ),
-            (ForcedLoginMethod::Chatgpt, AuthMode::ApiKey) => Some(
+            (
+                ForcedLoginMethod::Chatgpt,
+                AuthMode::ApiKey | AuthMode::GeminiApiKey | AuthMode::GeminiVertexAdc,
+            ) => Some(
                 "ChatGPT login is required, but an API key is currently being used. Logging out."
                     .to_string(),
             ),
@@ -1497,6 +1504,8 @@ impl AuthManager {
                     }
                     _ => false,
                 },
+                (ApiAuthMode::GeminiApiKey, ApiAuthMode::GeminiApiKey)
+                | (ApiAuthMode::GeminiVertexAdc, ApiAuthMode::GeminiVertexAdc) => false,
                 _ => false,
             },
             _ => false,

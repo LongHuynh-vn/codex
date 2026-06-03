@@ -1,0 +1,33 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-gemini-adapter"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "codex_gemini_adapter"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-api = { workspace = true }
+codex-model-provider-info = { workspace = true }
+codex-protocol = { workspace = true }
+codex-tools = { workspace = true }
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+wiremock = { workspace = true }

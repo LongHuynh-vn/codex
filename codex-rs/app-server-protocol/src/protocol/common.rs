@@ -15,7 +15,7 @@ use serde::Serialize;
 use strum_macros::Display;
 use ts_rs::TS;
 
-/// Authentication mode for OpenAI-backed providers.
+/// Authentication mode for model providers.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMode {
@@ -36,6 +36,16 @@ pub enum AuthMode {
     #[ts(rename = "agentIdentity")]
     #[strum(serialize = "agentIdentity")]
     AgentIdentity,
+    /// Google Gemini API key for AI Studio.
+    #[serde(rename = "geminiApiKey")]
+    #[ts(rename = "geminiApiKey")]
+    #[strum(serialize = "geminiApiKey")]
+    GeminiApiKey,
+    /// Google Vertex AI Application Default Credentials for Gemini.
+    #[serde(rename = "geminiVertexAdc")]
+    #[ts(rename = "geminiVertexAdc")]
+    #[strum(serialize = "geminiVertexAdc")]
+    GeminiVertexAdc,
 }
 
 macro_rules! experimental_reason_expr {

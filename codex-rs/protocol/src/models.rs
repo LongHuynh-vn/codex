@@ -792,6 +792,9 @@ pub enum ResponseItem {
         // Session::handle_function_call parse it into a Value.
         arguments: String,
         call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        thought_signature: Option<String>,
     },
     ToolSearchCall {
         #[serde(default, skip_serializing)]
@@ -2146,6 +2149,7 @@ mod tests {
                 namespace: Some("mcp__codex_apps__gmail".to_string()),
                 arguments: "{\"top_k\":5}".to_string(),
                 call_id: "call-1".to_string(),
+                thought_signature: None,
             }
         );
     }

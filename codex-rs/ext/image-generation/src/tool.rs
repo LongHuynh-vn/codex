@@ -199,6 +199,7 @@ fn edit_images(history: &[ResponseItem]) -> Vec<ImageUrl> {
                             name,
                             namespace: Some(namespace),
                             call_id: function_call_id,
+                            thought_signature: None,
                             ..
                         } if function_call_id == call_id
                             && name == IMAGEGEN_TOOL_NAME

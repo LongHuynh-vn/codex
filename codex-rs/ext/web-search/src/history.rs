@@ -97,6 +97,7 @@ mod tests {
                 namespace: None,
                 arguments: "{}".to_string(),
                 call_id: "call-1".to_string(),
+                thought_signature: None,
             },
             message(ASSISTANT_ROLE, "previous assistant"),
             message("developer", "developer"),

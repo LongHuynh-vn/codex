@@ -2544,6 +2544,7 @@ dependencies = [
  "codex-extension-api",
  "codex-features",
  "codex-feedback",
+ "codex-gemini-adapter",
  "codex-git-utils",
  "codex-hooks",
  "codex-install-context",
@@ -2958,6 +2959,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-gemini-adapter"
+version = "0.0.0"
+dependencies = [
+ "codex-api",
+ "codex-model-provider-info",
+ "codex-protocol",
+ "codex-tools",
+ "eventsource-stream",
+ "futures",
+ "http 1.4.0",
+ "pretty_assertions",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "codex-git-utils"
 version = "0.0.0"
 dependencies = [
@@ -3309,6 +3331,7 @@ dependencies = [
  "codex-aws-auth",
  "codex-client",
  "codex-feedback",
+ "codex-gemini-adapter",
  "codex-login",
  "codex-model-provider-info",
  "codex-models-manager",

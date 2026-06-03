@@ -153,6 +153,7 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
         namespace: Some("mcp__codex_apps__calendar".to_string()),
         arguments: "{}".to_string(),
         call_id: "call-namespace".to_string(),
+        thought_signature: None,
     })?
     .expect("function_call should produce a tool call");
 
@@ -364,6 +365,7 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
         namespace: Some("extension/".to_string()),
         arguments: json!({ "message": "hello" }).to_string(),
         call_id: "call-extension".to_string(),
+        thought_signature: None,
     })?
     .expect("function_call should produce a tool call");
     let result = router

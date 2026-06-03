@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
+use codex_gemini_adapter::model_config::gemini_model_catalog;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
@@ -183,6 +184,18 @@ impl ModelProvider for ConfiguredModelProvider {
         self.auth_manager.clone()
     }
 
+    fn capabilities(&self) -> ProviderCapabilities {
+        if self.info.is_gemini() {
+            ProviderCapabilities {
+                namespace_tools: false,
+                image_generation: false,
+                web_search: false,
+            }
+        } else {
+            ProviderCapabilities::default()
+        }
+    }
+
     fn supports_attestation(&self) -> bool {
         self.auth_manager
             .as_ref()
@@ -244,6 +257,10 @@ impl ModelProvider for ConfiguredModelProvider {
             Some(model_catalog) => Arc::new(StaticModelsManager::new(
                 self.auth_manager.clone(),
                 model_catalog,
+            )),
+            None if self.info.is_gemini() => Arc::new(StaticModelsManager::new(
+                self.auth_manager.clone(),
+                gemini_model_catalog(),
             )),
             None => {
                 let endpoint = Arc::new(OpenAiModelsEndpoint::new(

@@ -496,7 +496,7 @@
       ]
     },
     "AuthMode": {
-      "description": "Authentication mode for OpenAI-backed providers.",
+      "description": "Authentication mode for model providers.",
       "oneOf": [
         {
           "description": "OpenAI API key provided by the caller and stored by Codex.",
@@ -523,6 +523,20 @@
           "description": "Programmatic Codex auth backed by a registered Agent Identity.",
           "enum": [
             "agentIdentity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Google Gemini API key for AI Studio.",
+          "enum": [
+            "geminiApiKey"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Google Vertex AI Application Default Credentials for Gemini.",
+          "enum": [
+            "geminiVertexAdc"
           ],
           "type": "string"
         }
