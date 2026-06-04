@@ -9,7 +9,7 @@ use codex_utils_string::take_bytes_at_char_boundary;
 use http::header::CONTENT_TYPE;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::Value;
+use serde::Serialize;
 use url::Url;
 
 use crate::function_tool::FunctionCallError;
@@ -23,23 +23,27 @@ use crate::tools::registry::ToolExecutor;
 
 const WEB_SEARCH_TOOL_NAME: &str = "web_search";
 const WEB_FETCH_TOOL_NAME: &str = "web_fetch";
-const WEB_SEARCH_BACKEND_ENV: &str = "CODEX_GEMINI_WEB_SEARCH_URL";
+const TAVILY_API_KEY_ENV: &str = "TAVILY_API_KEY";
+const TAVILY_SEARCH_URL: &str = "https://api.tavily.com/search";
 const DEFAULT_SEARCH_LIMIT: usize = 5;
 const MAX_SEARCH_LIMIT: usize = 10;
 const DEFAULT_FETCH_MAX_BYTES: usize = 20_000;
 const MAX_FETCH_MAX_BYTES: usize = 50_000;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct ClientWebConfig {
-    pub(crate) search_endpoint: Option<String>,
+    tavily_api_key: Option<String>,
+    tavily_search_url: String,
 }
 
 impl ClientWebConfig {
     pub(crate) fn from_env() -> Self {
         Self {
-            search_endpoint: std::env::var(WEB_SEARCH_BACKEND_ENV)
+            tavily_api_key: std::env::var(TAVILY_API_KEY_ENV)
                 .ok()
-                .filter(|value| !value.trim().is_empty()),
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            tavily_search_url: TAVILY_SEARCH_URL.to_string(),
         }
     }
 }
@@ -77,6 +81,27 @@ struct WebFetchArgs {
     url: String,
     #[serde(default)]
     max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct TavilySearchRequest<'a> {
+    query: &'a str,
+    max_results: usize,
+    search_depth: &'static str,
+    topic: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct TavilySearchResponse {
+    #[serde(default)]
+    results: Vec<TavilySearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TavilySearchResult {
+    title: Option<String>,
+    url: Option<String>,
+    content: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -127,9 +152,9 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
                 "query must not be empty".to_string(),
             ));
         }
-        let Some(endpoint) = self.config.search_endpoint.as_deref() else {
+        let Some(api_key) = self.config.tavily_api_key.as_deref() else {
             return Err(FunctionCallError::RespondToModel(format!(
-                "web_search backend is not configured; set {WEB_SEARCH_BACKEND_ENV}"
+                "web_search is not configured; set {TAVILY_API_KEY_ENV} to use Tavily search"
             )));
         };
 
@@ -142,18 +167,28 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
                 "limit must be greater than zero".to_string(),
             ));
         }
-        let mut url = Url::parse(endpoint).map_err(|err| {
+        let url = Url::parse(&self.config.tavily_search_url).map_err(|err| {
             FunctionCallError::RespondToModel(format!(
-                "configured web_search endpoint is not a valid URL: {err}"
+                "configured Tavily search URL is not valid: {err}"
             ))
         })?;
-        url.query_pairs_mut()
-            .append_pair("q", query)
-            .append_pair("format", "json");
+        let request = TavilySearchRequest {
+            query,
+            max_results: limit,
+            search_depth: "basic",
+            topic: "general",
+        };
 
-        let response = self.client.get(url.clone()).send().await.map_err(|err| {
-            FunctionCallError::RespondToModel(format!("web_search request failed: {err}"))
-        })?;
+        let response = self
+            .client
+            .post(url.clone())
+            .bearer_auth(api_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!("web_search request failed: {err}"))
+            })?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -163,7 +198,7 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
             )));
         }
 
-        let body: Value = response.json().await.map_err(|err| {
+        let body: TavilySearchResponse = response.json().await.map_err(|err| {
             FunctionCallError::RespondToModel(format!("web_search response was not JSON: {err}"))
         })?;
         let output = format_search_results(&body, limit);
@@ -270,23 +305,19 @@ impl ToolExecutor<ToolInvocation> for ClientWebFetchHandler {
 
 impl CoreToolRuntime for ClientWebFetchHandler {}
 
-fn format_search_results(body: &Value, limit: usize) -> String {
-    let Some(results) = body.get("results").and_then(Value::as_array) else {
-        return "No results.".to_string();
-    };
-    if results.is_empty() {
+fn format_search_results(body: &TavilySearchResponse, limit: usize) -> String {
+    if body.results.is_empty() {
         return "No results.".to_string();
     }
 
     let mut lines = vec![format!(
         "Search results ({} shown):",
-        results.len().min(limit)
+        body.results.len().min(limit)
     )];
-    for (index, result) in results.iter().take(limit).enumerate() {
-        let title = string_field(result, &["title", "name"]).unwrap_or("Untitled");
-        let url = string_field(result, &["url", "href", "link"]).unwrap_or("");
-        let snippet =
-            string_field(result, &["content", "snippet", "description"]).unwrap_or_default();
+    for (index, result) in body.results.iter().take(limit).enumerate() {
+        let title = result.title.as_deref().unwrap_or("Untitled");
+        let url = result.url.as_deref().unwrap_or("");
+        let snippet = result.content.as_deref().unwrap_or_default();
         lines.push(format!("{}. {title}", index + 1));
         if !url.is_empty() {
             lines.push(format!("   URL: {url}"));
@@ -296,11 +327,6 @@ fn format_search_results(body: &Value, limit: usize) -> String {
         }
     }
     truncate_text(&lines.join("\n"), DEFAULT_FETCH_MAX_BYTES)
-}
-
-fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str))
 }
 
 fn html_to_text(input: &str) -> String {

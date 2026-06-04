@@ -1,6 +1,5 @@
 #![allow(clippy::expect_used)]
 
-use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
@@ -27,34 +26,6 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 use wiremock::matchers::path_regex;
-
-const WEB_SEARCH_BACKEND_ENV: &str = "CODEX_GEMINI_WEB_SEARCH_URL";
-
-struct EnvVarGuard {
-    key: &'static str,
-    original: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
-        let original = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.original {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub(super) struct GeminiRequestLog {
@@ -302,22 +273,8 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(gemini_builder()).await?;
-    let search_url = format!("{}/search", harness.server().uri());
-    let _search_env = EnvVarGuard::set(WEB_SEARCH_BACKEND_ENV, search_url.as_ref());
     let fetch_url = format!("{}/page", harness.server().uri());
 
-    Mock::given(method("GET"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "results": [{
-                "title": "Gemini native port",
-                "url": fetch_url,
-                "content": "Phase 2 web search result",
-            }]
-        })))
-        .expect(1)
-        .mount(harness.server())
-        .await;
     Mock::given(method("GET"))
         .and(path("/page"))
         .respond_with(
@@ -332,24 +289,14 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
     let requests = mount_gemini_sse_sequence(
         harness.server(),
         vec![
-            gemini_function_calls_sse(vec![
-                (
-                    "web_search",
-                    json!({
-                        "query": "gemini native phase 2",
-                        "limit": 1,
-                    }),
-                    Some("sig-web"),
-                ),
-                (
-                    "web_fetch",
-                    json!({
-                        "url": fetch_url,
-                        "max_bytes": 2000,
-                    }),
-                    None,
-                ),
-            ]),
+            gemini_function_calls_sse(vec![(
+                "web_fetch",
+                json!({
+                    "url": fetch_url,
+                    "max_bytes": 2000,
+                }),
+                None,
+            )]),
             gemini_text_sse("done"),
         ],
     )
@@ -358,7 +305,7 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
     harness
         .test()
         .submit_turn_with_permission_profile(
-            "search and fetch through Gemini client-side web tools",
+            "fetch through Gemini client-side web tools",
             PermissionProfile::Disabled,
         )
         .await?;
@@ -391,15 +338,9 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
         .iter()
         .filter_map(|response| response.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
-    assert_eq!(response_names, vec!["web_search", "web_fetch"]);
+    assert_eq!(response_names, vec!["web_fetch"]);
     assert!(
         function_responses[0]["response"]["output"]
-            .as_str()
-            .is_some_and(|output| output.contains("Phase 2 web search result")),
-        "web_search functionResponse must include mocked search result: {function_responses:?}"
-    );
-    assert!(
-        function_responses[1]["response"]["output"]
             .as_str()
             .is_some_and(|output| output.contains("Fetched Gemini Page")),
         "web_fetch functionResponse must include mocked fetched page: {function_responses:?}"

@@ -158,7 +158,7 @@ apply_patch <<'PATCH'
 *** End Patch
 PATCH
 
-Patch grammar: start with `*** Begin Patch`, then one or more file operations, then `*** End Patch`. File operations are `*** Add File: <path>` (new file; every content line starts with `+`), `*** Update File: <path>` (hunks start with `@@`; hunk lines start with space, `-`, or `+`), `*** Delete File: <path>`, and optional `*** Move to: <new path>` after an update header. Use relative paths only."#;
+Patch grammar: start with `*** Begin Patch`, then one or more file operations, then `*** End Patch`. File operations are `*** Add File: <path>` (new file; every content line starts with `+`), `*** Update File: <path>` (hunks start with `@@`; hunk lines start with space, `-`, or `+`). The `@@` line may carry an optional context string (e.g. a function header) but must NOT contain line numbers; the patch is matched by the surrounding context lines, not by line numbers. Operations also include `*** Delete File: <path>`, and optional `*** Move to: <new path>` after an update header. Use relative paths only."#;
 const GEMINI_SUBAGENT_COORDINATION_INSTRUCTIONS: &str = "Gemini subagent coordination: after spawning multiple agents, do not produce the final answer until you have received a final-status notification for every spawned task. If any spawned task is still active, running, or pending, call `wait_agent` again.";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.

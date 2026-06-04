@@ -9,9 +9,10 @@ use tokio::sync::Mutex;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::body_json;
+use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
-use wiremock::matchers::query_param;
 
 use super::*;
 use crate::session::tests::make_session_and_context;
@@ -47,10 +48,16 @@ fn function_output_text(item: ResponseInputItem) -> String {
 #[tokio::test]
 async fn web_search_executes_client_side_backend() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/"))
-        .and(query_param("q", "weather paris"))
-        .and(query_param("format", "json"))
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .and(header("authorization", "Bearer test-key"))
+        .and(header("content-type", "application/json"))
+        .and(body_json(json!({
+            "query": "weather paris",
+            "max_results": 2,
+            "search_depth": "basic",
+            "topic": "general"
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [
                 {
@@ -61,17 +68,19 @@ async fn web_search_executes_client_side_backend() {
                 {
                     "title": "Paris climate",
                     "url": "https://example.com/climate",
-                    "snippet": "Temperate"
+                    "content": "Temperate"
                 }
             ]
         })))
+        .expect(1)
         .mount(&server)
         .await;
 
     let handler = ClientWebSearchHandler::new(
         Client::new(),
         ClientWebConfig {
-            search_endpoint: Some(server.uri()),
+            tavily_api_key: Some("test-key".to_string()),
+            tavily_search_url: format!("{}/search", server.uri()),
         },
     );
     let payload = ToolPayload::Function {
@@ -101,6 +110,28 @@ async fn web_search_executes_client_side_backend() {
                 success: Some(true),
             },
         }
+    );
+}
+
+#[tokio::test]
+async fn web_search_requires_tavily_api_key() {
+    let handler = ClientWebSearchHandler::new(
+        Client::new(),
+        ClientWebConfig {
+            tavily_api_key: None,
+            tavily_search_url: "http://127.0.0.1/search".to_string(),
+        },
+    );
+    let result = handler
+        .handle(invocation(WEB_SEARCH_TOOL_NAME, json!({"query": "weather paris"})).await)
+        .await;
+
+    let Err(FunctionCallError::RespondToModel(message)) = result else {
+        panic!("expected missing Tavily key error");
+    };
+    assert_eq!(
+        message,
+        "web_search is not configured; set TAVILY_API_KEY to use Tavily search"
     );
 }
 
