@@ -4,6 +4,8 @@ use codex_tools::ToolSpec;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::schema_sanitizer::sanitize_tool_parameters;
+
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Tool {
@@ -24,7 +26,7 @@ pub(crate) fn build_tools(tools: &[ToolSpec]) -> Result<Option<Vec<Tool>>> {
             ToolSpec::Function(tool) => declarations.push(FunctionDeclaration {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: serde_json::to_value(&tool.parameters)?,
+                parameters: sanitize_tool_parameters(serde_json::to_value(&tool.parameters)?),
             }),
             ToolSpec::Namespace(_)
             | ToolSpec::ToolSearch { .. }

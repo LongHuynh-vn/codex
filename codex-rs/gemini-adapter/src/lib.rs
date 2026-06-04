@@ -3,6 +3,7 @@ mod error;
 pub mod model_config;
 mod request_translator;
 mod response_translator;
+mod schema_sanitizer;
 mod signature_store;
 mod tool_translator;
 

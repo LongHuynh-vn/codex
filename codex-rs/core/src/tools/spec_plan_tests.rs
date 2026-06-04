@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use codex_features::Feature;
+use codex_gemini_adapter::GEMINI_3_5_FLASH_MODEL;
+use codex_gemini_adapter::model_config::gemini_model_catalog;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::GEMINI_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
@@ -280,6 +283,26 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
         config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
         config.model_provider = provider_info.clone();
     });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn use_gemini_provider(turn: &mut TurnContext) {
+    let mut provider_info = ModelProviderInfo::create_gemini_provider();
+    provider_info.experimental_bearer_token = Some("test-gemini-key".to_string());
+    let catalog = gemini_model_catalog();
+    let model_info = catalog
+        .models
+        .iter()
+        .find(|model| model.slug == GEMINI_3_5_FLASH_MODEL)
+        .expect("gemini flash model")
+        .clone();
+    update_config(turn, |config| {
+        config.model = Some(GEMINI_3_5_FLASH_MODEL.to_string());
+        config.model_catalog = Some(catalog.clone());
+        config.model_provider_id = GEMINI_PROVIDER_ID.to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.model_info = model_info;
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
@@ -616,6 +639,31 @@ async fn environment_count_controls_environment_backed_tools() {
         multiple_environments.visible_spec("view_image"),
         "environment_id"
     ));
+}
+
+#[tokio::test]
+async fn gemini_routes_apply_patch_through_shell_not_freeform_tool() {
+    let plan = probe(|turn| {
+        use_gemini_provider(turn);
+        set_feature(turn, Feature::ShellTool, /*enabled*/ true);
+    })
+    .await;
+
+    assert!(
+        plan.visible_names
+            .iter()
+            .any(|name| name == "shell_command" || name == "exec_command"),
+        "Gemini should expose a shell/exec tool for apply_patch routing: {:?}",
+        plan.visible_names
+    );
+    plan.assert_visible_lacks(&["apply_patch"]);
+    assert!(
+        !plan
+            .visible_specs
+            .iter()
+            .any(|spec| matches!(spec, ToolSpec::Freeform(tool) if tool.name == "apply_patch")),
+        "Gemini must not expose the freeform apply_patch tool"
+    );
 }
 
 #[tokio::test]
@@ -1296,4 +1344,41 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
     })
     .await;
     unsupported_provider.assert_visible_lacks(&["web_search"]);
+}
+
+#[tokio::test]
+async fn gemini_uses_client_side_web_function_tools() {
+    let plan = probe(|turn| {
+        use_gemini_provider(turn);
+        set_web_search_mode(turn, WebSearchMode::Live);
+    })
+    .await;
+
+    plan.assert_visible_contains(&["web_search", "web_fetch"]);
+    plan.assert_registered_contains(&["web_search", "web_fetch"]);
+    assert!(matches!(
+        plan.visible_spec("web_search"),
+        ToolSpec::Function(tool) if tool.name == "web_search"
+    ));
+    assert!(matches!(
+        plan.visible_spec("web_fetch"),
+        ToolSpec::Function(tool) if tool.name == "web_fetch"
+    ));
+
+    let disabled = probe(|turn| {
+        use_gemini_provider(turn);
+        set_web_search_mode(turn, WebSearchMode::Disabled);
+    })
+    .await;
+    disabled.assert_visible_lacks(&["web_search", "web_fetch"]);
+    disabled.assert_registered_lacks(&["web_search", "web_fetch"]);
+
+    let code_mode_only = probe(|turn| {
+        use_gemini_provider(turn);
+        set_features(turn, &[Feature::CodeModeOnly]);
+        set_web_search_mode(turn, WebSearchMode::Live);
+    })
+    .await;
+    code_mode_only.assert_visible_lacks(&["web_search", "web_fetch"]);
+    code_mode_only.assert_registered_lacks(&["web_search", "web_fetch"]);
 }

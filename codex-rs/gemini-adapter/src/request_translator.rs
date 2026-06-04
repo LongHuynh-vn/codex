@@ -9,6 +9,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::GeminiPrompt;
 use crate::signature_store::SignatureStore;
@@ -154,8 +155,9 @@ fn contents_from_response_items(
     store: &SignatureStore,
 ) -> Result<Vec<Content>> {
     let mut contents = Vec::new();
-    for item in items {
-        match item {
+    let mut index = 0;
+    while index < items.len() {
+        match &items[index] {
             ResponseItem::Message { role, content, .. } => {
                 let gemini_role = if role == "assistant" { "model" } else { "user" };
                 let parts = parts_from_content_items(content)?;
@@ -165,33 +167,41 @@ fn contents_from_response_items(
                         parts,
                     });
                 }
+                index += 1;
             }
             ResponseItem::Reasoning {
                 encrypted_content: Some(encrypted_content),
                 ..
-            } => contents.push(Content {
-                role: "model".to_string(),
-                parts: vec![Part {
-                    thought_signature: Some(encrypted_content.clone()),
-                    thought: Some(true),
-                    ..Part::default()
-                }],
-            }),
-            ResponseItem::Reasoning {
-                encrypted_content: None,
-                ..
-            } => {}
-            ResponseItem::FunctionCall {
-                name,
-                arguments,
-                call_id,
-                thought_signature,
-                ..
             } => {
-                let args = function_call_args(arguments)?;
                 contents.push(Content {
                     role: "model".to_string(),
                     parts: vec![Part {
+                        thought_signature: Some(encrypted_content.clone()),
+                        thought: Some(true),
+                        ..Part::default()
+                    }],
+                });
+                index += 1;
+            }
+            ResponseItem::Reasoning {
+                encrypted_content: None,
+                ..
+            } => {
+                index += 1;
+            }
+            ResponseItem::FunctionCall { .. } => {
+                let mut call_ids = Vec::new();
+                let mut call_parts = Vec::new();
+                while let Some(ResponseItem::FunctionCall {
+                    name,
+                    arguments,
+                    call_id,
+                    thought_signature,
+                    ..
+                }) = items.get(index)
+                {
+                    let args = function_call_args(arguments)?;
+                    call_parts.push(Part {
                         function_call: Some(FunctionCall {
                             name: name.clone(),
                             args,
@@ -202,8 +212,48 @@ fn contents_from_response_items(
                                 .and_then(|call| call.thought_signature.clone())
                         }),
                         ..Part::default()
-                    }],
+                    });
+                    call_ids.push(call_id.clone());
+                    index += 1;
+                }
+                contents.push(Content {
+                    role: "model".to_string(),
+                    parts: call_parts,
                 });
+
+                let mut outputs_by_call_id = HashMap::new();
+                while let Some(ResponseItem::FunctionCallOutput { call_id, output }) =
+                    items.get(index)
+                {
+                    if !call_ids.iter().any(|candidate| candidate == call_id) {
+                        break;
+                    }
+                    outputs_by_call_id.insert(call_id.clone(), output);
+                    index += 1;
+                }
+                let mut response_parts = Vec::new();
+                for call_id in call_ids {
+                    if let Some(output) = outputs_by_call_id.remove(&call_id) {
+                        let call = store.get(&call_id).ok_or_else(|| {
+                            CodexErr::InvalidRequest(format!(
+                                "Gemini function response is missing function call name for call_id `{call_id}`"
+                            ))
+                        })?;
+                        response_parts.push(Part {
+                            function_response: Some(FunctionResponse {
+                                name: call.name.clone(),
+                                response: function_output_response(output)?,
+                            }),
+                            ..Part::default()
+                        });
+                    }
+                }
+                if !response_parts.is_empty() {
+                    contents.push(Content {
+                        role: "user".to_string(),
+                        parts: response_parts,
+                    });
+                }
             }
             ResponseItem::FunctionCallOutput { call_id, output } => {
                 let call = store.get(call_id).ok_or_else(|| {
@@ -221,6 +271,7 @@ fn contents_from_response_items(
                         ..Part::default()
                     }],
                 });
+                index += 1;
             }
             ResponseItem::LocalShellCall { .. }
             | ResponseItem::ToolSearchCall { .. }

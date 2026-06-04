@@ -13,6 +13,7 @@ use futures::StreamExt;
 use http::StatusCode;
 use pretty_assertions::assert_eq;
 use reqwest::Response;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -216,6 +217,150 @@ async fn live_gemini_three_step_tool_loop_when_auth_is_set() {
     }
 }
 
+#[tokio::test]
+async fn live_gemini_accepts_sanitized_complex_schema_when_auth_is_set() {
+    if !live_auth_configured() {
+        eprintln!(
+            "skipping live Gemini schema smoke test: configure GEMINI_API_KEY or Vertex ADC env vars"
+        );
+        return;
+    }
+
+    let provider = ModelProviderInfo::create_gemini_provider();
+    let model_info = model_config::gemini_model_catalog()
+        .models
+        .into_iter()
+        .find(|model| model.slug == GEMINI_3_5_FLASH_MODEL)
+        .expect("gemini flash model");
+    let prompt = GeminiPrompt {
+        instructions: "You are running a schema acceptance smoke test. Reply with done."
+            .to_string(),
+        input: vec![user_message(
+            "Do not call the tool. Reply with the word done.",
+        )],
+        tools: vec![complex_schema_tool()],
+    };
+    let request = request_translator::build_generate_content_request(
+        &prompt,
+        &model_info,
+        Some(ReasoningEffort::Low),
+    )
+    .expect("complex schema request should build");
+    let request_value = serde_json::to_value(&request).expect("request JSON");
+    let parameters = &request_value["tools"][0]["functionDeclarations"][0]["parameters"];
+    assert!(parameters.get("additionalProperties").is_none());
+    assert!(parameters["properties"]["metadata"].get("$ref").is_none());
+    assert!(
+        parameters["properties"]["metadata"]
+            .get("additionalProperties")
+            .is_none()
+    );
+
+    let response = send_live_generate_content(
+        &provider,
+        &model_info,
+        &request,
+        &request_value,
+        "LIVE_GEMINI_SCHEMA",
+    )
+    .await;
+    let schema_turn = collect_live_response(response, "LIVE_GEMINI_SCHEMA")
+        .await
+        .expect("live schema response should stream");
+    assert!(
+        schema_turn.token_usage.is_some(),
+        "live schema response should map usageMetadata into TokenUsage"
+    );
+}
+
+#[tokio::test]
+async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set() {
+    if !live_auth_configured() {
+        eprintln!(
+            "skipping live Gemini parallel smoke test: configure GEMINI_API_KEY or Vertex ADC env vars"
+        );
+        return;
+    }
+
+    let provider = ModelProviderInfo::create_gemini_provider();
+    let model_info = model_config::gemini_model_catalog()
+        .models
+        .into_iter()
+        .find(|model| model.slug == GEMINI_3_5_FLASH_MODEL)
+        .expect("gemini flash model");
+    let tools = vec![weather_tool()];
+    let mut input = vec![user_message(
+        "Call get_weather for Paris and London in the same model response. Emit exactly two get_weather function calls now: one with city Paris and one with city London. Do not wait for a tool result between them. Do not answer in text.",
+    )];
+    let first_prompt = GeminiPrompt {
+        instructions: "You are running a parallel function-calling smoke test.".to_string(),
+        input: input.clone(),
+        tools: tools.clone(),
+    };
+    let first_request = request_translator::build_generate_content_request(
+        &first_prompt,
+        &model_info,
+        Some(ReasoningEffort::Low),
+    )
+    .expect("parallel request should build");
+    let first_request_value = serde_json::to_value(&first_request).expect("request JSON");
+    let first_response = send_live_generate_content(
+        &provider,
+        &model_info,
+        &first_request,
+        &first_request_value,
+        "LIVE_GEMINI_PARALLEL_STEP_1",
+    )
+    .await;
+    let first_turn = collect_live_response(first_response, "LIVE_GEMINI_PARALLEL_STEP_1")
+        .await
+        .expect("live parallel first response should stream");
+    assert!(
+        first_turn.token_usage.is_some(),
+        "live parallel response should map usageMetadata into TokenUsage"
+    );
+    assert_eq!(first_turn.calls.len(), 2);
+    assert!(function_call_signature(&first_turn.calls[0]).is_some());
+    assert_eq!(function_call_signature(&first_turn.calls[1]), None);
+
+    let first_call_id = function_call_id(&first_turn.calls[0]).to_string();
+    let second_call_id = function_call_id(&first_turn.calls[1]).to_string();
+    input.extend(first_turn.calls.clone());
+    input.push(ResponseItem::FunctionCallOutput {
+        call_id: first_call_id,
+        output: FunctionCallOutputPayload::from_text("Paris weather: clear".to_string()),
+    });
+    input.push(ResponseItem::FunctionCallOutput {
+        call_id: second_call_id,
+        output: FunctionCallOutputPayload::from_text("London weather: cloudy".to_string()),
+    });
+
+    let follow_up_prompt = GeminiPrompt {
+        instructions: "You are running a parallel function-calling smoke test.".to_string(),
+        input,
+        tools,
+    };
+    let follow_up_request = request_translator::build_generate_content_request(
+        &follow_up_prompt,
+        &model_info,
+        Some(ReasoningEffort::Low),
+    )
+    .expect("parallel follow-up request should build");
+    let follow_up_value = serde_json::to_value(&follow_up_request).expect("request JSON");
+    assert_parallel_replay_request(&follow_up_value);
+    let follow_up_response = send_live_generate_content(
+        &provider,
+        &model_info,
+        &follow_up_request,
+        &follow_up_value,
+        "LIVE_GEMINI_PARALLEL_STEP_2",
+    )
+    .await;
+    let _ = collect_live_response(follow_up_response, "LIVE_GEMINI_PARALLEL_STEP_2")
+        .await
+        .expect("live parallel follow-up response should stream");
+}
+
 #[test]
 fn vertex_endpoint_uses_global_aiplatform_host_for_gemini_3_x() {
     let provider = ModelProviderInfo::create_gemini_provider();
@@ -238,6 +383,97 @@ struct LiveGeminiTurn {
     token_usage: TokenUsage,
 }
 
+struct LiveGeminiResponse {
+    calls: Vec<ResponseItem>,
+    token_usage: Option<TokenUsage>,
+}
+
+async fn send_live_generate_content<T: Serialize + ?Sized>(
+    provider: &ModelProviderInfo,
+    model_info: &codex_protocol::openai_models::ModelInfo,
+    request: &T,
+    request_value: &Value,
+    label: &str,
+) -> Response {
+    let mut auth = auth::resolve_auth(provider)
+        .await
+        .expect("live Gemini auth should resolve");
+    let url = auth.endpoint(provider, &model_info.slug);
+    eprintln!("{label}_ENDPOINT {url}");
+    eprintln!(
+        "{label}_REQUEST {}",
+        serde_json::to_string_pretty(request_value).expect("pretty request JSON")
+    );
+
+    let client = reqwest::Client::new();
+    let mut response = send_request(&client, &auth, provider, &model_info.slug, request)
+        .await
+        .expect("live Gemini request should send");
+    if response.status() == StatusCode::UNAUTHORIZED
+        && auth
+            .refresh_vertex_adc_once()
+            .await
+            .expect("ADC refresh should not fail")
+    {
+        response = send_request(&client, &auth, provider, &model_info.slug, request)
+            .await
+            .expect("live Gemini retry should send");
+    }
+    ensure_live_success_with_label(response, &url, label).await
+}
+
+async fn collect_live_response(
+    response: Response,
+    label: &str,
+) -> codex_protocol::error::Result<LiveGeminiResponse> {
+    let mut accumulator = response_translator::StreamAccumulator::default();
+    let mut events = response.bytes_stream().eventsource();
+    let mut chunk_index = 0_usize;
+
+    while let Some(event) = events.next().await {
+        let event = event.expect("live Gemini SSE event");
+        if event.data.trim() == "[DONE]" {
+            eprintln!("{label}_RESPONSE_DONE [DONE]");
+            break;
+        }
+        let chunk_value: Value = serde_json::from_str(&event.data)?;
+        eprintln!(
+            "{label}_RESPONSE_CHUNK_{chunk_index} {}",
+            serde_json::to_string_pretty(&chunk_value)?
+        );
+        assert!(accumulator.process_event_data(&event.data)?.is_empty());
+        chunk_index += 1;
+        if accumulator.is_finished() {
+            break;
+        }
+    }
+
+    let mut calls = Vec::new();
+    let mut token_usage = None;
+    for event in accumulator.finish()? {
+        match event {
+            ResponseEvent::OutputItemDone(item @ ResponseItem::FunctionCall { .. }) => {
+                eprintln!(
+                    "{label}_CODEX_FUNCTION_CALL {}",
+                    serde_json::to_string_pretty(&item)?
+                );
+                calls.push(item);
+            }
+            ResponseEvent::Completed {
+                token_usage: usage, ..
+            } => {
+                eprintln!(
+                    "{label}_CODEX_TOKEN_USAGE {}",
+                    serde_json::to_string_pretty(&usage)?
+                );
+                token_usage = usage;
+            }
+            _ => {}
+        }
+    }
+    Ok(LiveGeminiResponse { calls, token_usage })
+}
+
 async fn live_next_function_call(
     provider: &ModelProviderInfo,
     model_info: &codex_protocol::openai_models::ModelInfo,
@@ -251,7 +487,6 @@ async fn live_next_function_call(
         input,
         tools,
     };
-    let mut auth = auth::resolve_auth(provider).await?;
     let request = request_translator::build_generate_content_request(
         &prompt,
         model_info,
@@ -269,19 +504,14 @@ async fn live_next_function_call(
     );
     assert_signed_replay_shape(&request_value, expected_step);
 
-    let url = auth.endpoint(provider, &model_info.slug);
-    eprintln!("LIVE_GEMINI_STEP_{expected_step}_ENDPOINT {url}");
-    eprintln!(
-        "LIVE_GEMINI_STEP_{expected_step}_REQUEST {}",
-        serde_json::to_string_pretty(&request_value)?
-    );
-
-    let client = reqwest::Client::new();
-    let mut response = send_request(&client, &auth, provider, &model_info.slug, &request).await?;
-    if response.status() == StatusCode::UNAUTHORIZED && auth.refresh_vertex_adc_once().await? {
-        response = send_request(&client, &auth, provider, &model_info.slug, &request).await?;
-    }
-    let response = ensure_live_success(response, &url, expected_step).await;
+    let response = send_live_generate_content(
+        provider,
+        model_info,
+        &request,
+        &request_value,
+        &format!("LIVE_GEMINI_STEP_{expected_step}"),
+    )
+    .await;
     let mut accumulator = response_translator::StreamAccumulator::default();
     let mut events = response.bytes_stream().eventsource();
     let mut raw_usage = None;
@@ -339,7 +569,7 @@ async fn live_next_function_call(
     })
 }
 
-async fn ensure_live_success(response: Response, url: &str, expected_step: usize) -> Response {
+async fn ensure_live_success_with_label(response: Response, url: &str, label: &str) -> Response {
     if response.status().is_success() {
         return response;
     }
@@ -348,9 +578,9 @@ async fn ensure_live_success(response: Response, url: &str, expected_step: usize
     let body = response.text().await.unwrap_or_default();
     assert!(
         !(status == StatusCode::BAD_REQUEST && body.contains("missing thought_signature")),
-        "live Gemini step {expected_step} hit missing thought_signature 400 at {url}: {body}"
+        "live Gemini {label} hit missing thought_signature 400 at {url}: {body}"
     );
-    panic!("live Gemini step {expected_step} failed with {status} at {url}: {body}");
+    panic!("live Gemini {label} failed with {status} at {url}: {body}");
 }
 
 fn live_auth_configured() -> bool {
@@ -437,6 +667,46 @@ fn assert_token_usage_matches_raw(raw_usage: &Value, token_usage: &TokenUsage) {
     assert_eq!(token_usage, &expected);
 }
 
+fn assert_parallel_replay_request(request: &Value) {
+    let model_parts = request["contents"][1]["parts"]
+        .as_array()
+        .expect("model function call parts");
+    assert_eq!(model_parts.len(), 2);
+    assert!(model_parts[0].get("functionCall").is_some());
+    assert!(
+        model_parts[0]
+            .get("thoughtSignature")
+            .and_then(Value::as_str)
+            .is_some_and(|signature| !signature.is_empty())
+    );
+    assert!(model_parts[1].get("functionCall").is_some());
+    assert!(model_parts[1].get("thoughtSignature").is_none());
+
+    let response_parts = request["contents"][2]["parts"]
+        .as_array()
+        .expect("user function response parts");
+    assert_eq!(response_parts.len(), 2);
+    assert!(response_parts[0].get("functionResponse").is_some());
+    assert!(response_parts[1].get("functionResponse").is_some());
+}
+
+fn function_call_signature(call: &ResponseItem) -> Option<&str> {
+    let ResponseItem::FunctionCall {
+        thought_signature, ..
+    } = call
+    else {
+        panic!("expected function call");
+    };
+    thought_signature.as_deref()
+}
+
+fn function_call_id(call: &ResponseItem) -> &str {
+    let ResponseItem::FunctionCall { call_id, .. } = call else {
+        panic!("expected function call");
+    };
+    call_id
+}
+
 async fn mount_gemini_sse(server: &MockServer, chunk: &str, expected_requests: u64) {
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(
@@ -521,4 +791,68 @@ fn step_tool() -> Vec<ToolSpec> {
         ),
         output_schema: None,
     })]
+}
+
+fn weather_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "get_weather".to_string(),
+        description: "Get weather for a city.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            BTreeMap::from([(
+                "city".to_string(),
+                JsonSchema::string(Some("City name.".to_string())),
+            )]),
+            Some(vec!["city".to_string()]),
+            None,
+        ),
+        output_schema: None,
+    })
+}
+
+fn complex_schema_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "complex_schema_tool".to_string(),
+        description: "A tool with a schema that must be sanitized for Gemini.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: serde_json::from_value(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "$defs": {
+                "Metadata": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string", "format": "uri-reference"}
+                    }
+                }
+            },
+            "properties": {
+                "query": {"type": "string", "format": "regex"},
+                "metadata": {
+                    "$ref": "#/$defs/Metadata",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "source": {"type": "string", "format": "uri-reference"},
+                        "nested": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "priority": {"type": "integer"},
+                                "tags": {
+                                    "type": "array",
+                                    "items": {"type": "string", "format": "uuid"}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "required": ["query"]
+        }))
+        .expect("complex schema should parse"),
+        output_schema: None,
+    })
 }

@@ -4,6 +4,9 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::ClientWebConfig;
+use crate::tools::handlers::ClientWebFetchHandler;
+use crate::tools::handlers::ClientWebSearchHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CreateGoalHandler;
@@ -58,7 +61,9 @@ use crate::tools::router::ToolRouter;
 use crate::tools::router::ToolRouterParams;
 use codex_features::Feature;
 use codex_login::AuthManager;
+use codex_login::default_client::build_reqwest_client;
 use codex_mcp::ToolInfo;
+use codex_model_provider_info::WireApi;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
@@ -526,6 +531,7 @@ fn code_mode_namespace_descriptions(
 
 fn add_tool_sources(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     add_shell_tools(context, planned_tools);
+    add_client_web_tools(context, planned_tools);
     add_mcp_resource_tools(context, planned_tools);
     add_core_utility_tools(context, planned_tools);
     add_collaboration_tools(context, planned_tools);
@@ -535,6 +541,29 @@ fn add_tool_sources(context: &CoreToolPlanContext<'_>, planned_tools: &mut Plann
     for spec in hosted_model_tool_specs(context) {
         planned_tools.add_hosted_spec(spec);
     }
+}
+
+fn add_client_web_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
+    let turn_context = context.turn_context;
+    if turn_context.provider.info().wire_api != WireApi::GeminiNative {
+        return;
+    }
+    if turn_context.config.web_search_mode.value()
+        == codex_protocol::config_types::WebSearchMode::Disabled
+    {
+        return;
+    }
+    if matches!(
+        turn_context.tool_mode,
+        ToolMode::CodeMode | ToolMode::CodeModeOnly
+    ) {
+        return;
+    }
+
+    let client = build_reqwest_client();
+    let config = ClientWebConfig::from_env();
+    planned_tools.add(ClientWebSearchHandler::new(client.clone(), config));
+    planned_tools.add(ClientWebFetchHandler::new(client));
 }
 
 fn standalone_web_run_available(
