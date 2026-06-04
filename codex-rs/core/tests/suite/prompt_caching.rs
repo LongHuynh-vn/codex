@@ -286,6 +286,10 @@ async fn gpt_5_tools_without_apply_patch_append_apply_patch_instructions() -> an
         instructions0.contains("You are"),
         "expected non-empty instructions"
     );
+    assert!(
+        !instructions0.contains("Gemini file edits"),
+        "OpenAI Responses instructions must not include Gemini-only apply_patch guidance"
+    );
 
     let body1 = req2.single_request().body_json();
     let instructions1 = body1["instructions"]

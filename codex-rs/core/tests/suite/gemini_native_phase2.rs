@@ -255,6 +255,30 @@ async fn gemini_apply_patch_uses_exec_command_intercept() -> Result<()> {
         !tool_names.contains(&"apply_patch"),
         "Gemini request must not expose freeform apply_patch: {tool_names:?}"
     );
+    let instructions = captured[0]["systemInstruction"]["parts"][0]["text"]
+        .as_str()
+        .expect("Gemini request systemInstruction text");
+    assert!(
+        instructions.contains("prefer the `apply_patch` shell command"),
+        "Gemini systemInstruction must teach apply_patch usage: {instructions}"
+    );
+    assert!(
+        instructions.contains("apply_patch <<'PATCH'"),
+        "Gemini systemInstruction must show heredoc invocation: {instructions}"
+    );
+    assert!(
+        instructions.contains("*** Begin Patch")
+            && instructions.contains("*** Add File: <path>")
+            && instructions.contains("*** Update File: <path>")
+            && instructions.contains("*** Delete File: <path>")
+            && instructions.contains("*** Move to: <new path>")
+            && instructions.contains("*** End Patch"),
+        "Gemini systemInstruction must preserve apply_patch envelope grammar: {instructions}"
+    );
+    assert!(
+        instructions.contains("`cat >`, `python -c`, or `sed`"),
+        "Gemini systemInstruction must prefer apply_patch over shell writes: {instructions}"
+    );
 
     let follow_up_parts = captured[1]["contents"]
         .as_array()

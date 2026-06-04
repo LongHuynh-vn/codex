@@ -391,6 +391,14 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
                 eprintln!("Logged in using access token");
                 std::process::exit(0);
             }
+            AuthMode::GeminiApiKey => {
+                eprintln!("Logged in using Gemini (API key)");
+                std::process::exit(0);
+            }
+            AuthMode::GeminiVertexAdc => {
+                eprintln!("Logged in using Gemini (Vertex ADC)");
+                std::process::exit(0);
+            }
         },
         Ok(None) => {
             eprintln!("Not logged in");

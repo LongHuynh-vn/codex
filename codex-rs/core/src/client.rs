@@ -147,6 +147,18 @@ const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const GEMINI_APPLY_PATCH_INSTRUCTIONS: &str = r#"Gemini file edits: prefer the `apply_patch` shell command over `cat >`, `python -c`, or `sed`, especially for small in-place edits. Call the visible shell tool (`exec_command` or `shell_command`) with a heredoc such as:
+
+apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: path/to/file
+@@
+-old line
++new line
+*** End Patch
+PATCH
+
+Patch grammar: start with `*** Begin Patch`, then one or more file operations, then `*** End Patch`. File operations are `*** Add File: <path>` (new file; every content line starts with `+`), `*** Update File: <path>` (hunks start with `@@`; hunk lines start with space, `-`, or `+`), `*** Delete File: <path>`, and optional `*** Move to: <new path>` after an update header. Use relative paths only."#;
 const GEMINI_SUBAGENT_COORDINATION_INSTRUCTIONS: &str = "Gemini subagent coordination: after spawning multiple agents, do not produce the final answer until you have received a final-status notification for every spawned task. If any spawned task is still active, running, or pending, call `wait_agent` again.";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
@@ -1376,6 +1388,20 @@ impl ModelClientSession {
                 prompt.tools.clone()
             };
         let mut instructions = prompt.base_instructions.text.clone();
+        if tools.iter().any(|tool| {
+            matches!(
+                tool,
+                codex_tools::ToolSpec::Function(function)
+                    if function.name == "exec_command" || function.name == "shell_command"
+            )
+        }) && !instructions.contains("Use the `apply_patch` shell command")
+            && !instructions.contains("apply_patch <<'PATCH'")
+        {
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(GEMINI_APPLY_PATCH_INSTRUCTIONS);
+        }
         if tools.iter().any(|tool| {
             matches!(
                 tool,

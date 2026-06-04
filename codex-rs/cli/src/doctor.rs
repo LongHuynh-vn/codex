@@ -1308,6 +1308,8 @@ fn stored_auth_mode(auth: &codex_login::AuthDotJson) -> &'static str {
         codex_app_server_protocol::AuthMode::Chatgpt => "chatgpt",
         codex_app_server_protocol::AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
         codex_app_server_protocol::AuthMode::AgentIdentity => "agent_identity",
+        codex_app_server_protocol::AuthMode::GeminiApiKey => "gemini_api_key",
+        codex_app_server_protocol::AuthMode::GeminiVertexAdc => "gemini_vertex_adc",
     }
 }
 
@@ -1380,6 +1382,8 @@ fn stored_auth_issues(
                 issues.push("agent identity auth is missing an agent identity token");
             }
         }
+        codex_app_server_protocol::AuthMode::GeminiApiKey
+        | codex_app_server_protocol::AuthMode::GeminiVertexAdc => {}
     }
     issues
 }
@@ -2408,6 +2412,8 @@ fn auth_mode_name(auth: &CodexAuth) -> &'static str {
         codex_app_server_protocol::AuthMode::Chatgpt => "chatgpt",
         codex_app_server_protocol::AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
         codex_app_server_protocol::AuthMode::AgentIdentity => "agent_identity",
+        codex_app_server_protocol::AuthMode::GeminiApiKey => "gemini_api_key",
+        codex_app_server_protocol::AuthMode::GeminiVertexAdc => "gemini_vertex_adc",
     }
 }
 
@@ -2537,7 +2543,11 @@ fn provider_auth_reachability_mode_from_auth(
         return ProviderAuthReachabilityMode::Chatgpt;
     }
     match stored_auth.map(stored_auth_mode_value) {
-        Some(codex_app_server_protocol::AuthMode::ApiKey) => ProviderAuthReachabilityMode::ApiKey,
+        Some(
+            codex_app_server_protocol::AuthMode::ApiKey
+            | codex_app_server_protocol::AuthMode::GeminiApiKey
+            | codex_app_server_protocol::AuthMode::GeminiVertexAdc,
+        ) => ProviderAuthReachabilityMode::ApiKey,
         Some(
             codex_app_server_protocol::AuthMode::Chatgpt
             | codex_app_server_protocol::AuthMode::ChatgptAuthTokens
