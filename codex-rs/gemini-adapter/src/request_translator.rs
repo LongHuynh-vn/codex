@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::GeminiPrompt;
+use crate::schema_sanitizer;
 use crate::signature_store::SignatureStore;
 use crate::tool_translator;
 use crate::tool_translator::Tool;
@@ -93,6 +94,10 @@ pub(crate) struct GenerationConfig {
     pub(crate) temperature: f32,
     pub(crate) max_output_tokens: i64,
     pub(crate) thinking_config: ThinkingConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) response_schema: Option<Value>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -127,12 +132,20 @@ pub(crate) fn build_generate_content_request(
             allowed_function_names: None,
         },
     });
+    let output_schema = prompt
+        .output_schema
+        .clone()
+        .map(schema_sanitizer::sanitize_tool_parameters);
+    let response_mime_type = output_schema
+        .as_ref()
+        .map(|_| "application/json".to_string());
+    let system_instruction = normalize_system_instruction(&prompt.instructions);
 
     Ok(GenerateContentRequest {
-        system_instruction: (!prompt.instructions.trim().is_empty()).then(|| Content {
+        system_instruction: (!system_instruction.is_empty()).then(|| Content {
             role: "user".to_string(),
             parts: vec![Part {
-                text: Some(prompt.instructions.clone()),
+                text: Some(system_instruction),
                 ..Part::default()
             }],
         }),
@@ -146,8 +159,32 @@ pub(crate) fn build_generate_content_request(
                 thinking_level: thinking_level(effort.or(model_info.default_reasoning_level)),
                 include_thoughts: true,
             },
+            response_mime_type,
+            response_schema: output_schema,
         },
     })
+}
+
+fn normalize_system_instruction(instructions: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_blank = false;
+    for line in instructions.trim().lines() {
+        if line.trim().is_empty() {
+            if !previous_blank && !normalized.is_empty() {
+                normalized.push('\n');
+                normalized.push('\n');
+            }
+            previous_blank = true;
+            continue;
+        }
+
+        if !normalized.is_empty() && !normalized.ends_with('\n') {
+            normalized.push('\n');
+        }
+        normalized.push_str(line);
+        previous_blank = false;
+    }
+    normalized
 }
 
 fn contents_from_response_items(

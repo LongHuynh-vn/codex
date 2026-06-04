@@ -588,6 +588,9 @@ impl ModelClient {
         if raw_memories.is_empty() {
             return Ok(Vec::new());
         }
+        if self.state.provider.info().is_gemini() {
+            return Ok(Vec::new());
+        }
 
         let client_setup = self.current_client_setup().await?;
         let transport = ReqwestTransport::new(build_reqwest_client());
@@ -1363,6 +1366,14 @@ impl ModelClientSession {
         _turn_metadata_header: Option<&str>,
         _inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        let tools =
+            if crate::guardian::is_guardian_reviewer_source(&self.client.state.session_source)
+                && prompt.output_schema.is_some()
+            {
+                Vec::new()
+            } else {
+                prompt.tools.clone()
+            };
         let rx = codex_gemini_adapter::stream_generate_content(
             build_reqwest_client(),
             self.client.state.provider.info(),
@@ -1370,7 +1381,8 @@ impl ModelClientSession {
             GeminiPrompt {
                 instructions: prompt.base_instructions.text.clone(),
                 input: prompt.get_formatted_input(),
-                tools: prompt.tools.clone(),
+                tools,
+                output_schema: prompt.output_schema.clone(),
             },
             effort,
         )

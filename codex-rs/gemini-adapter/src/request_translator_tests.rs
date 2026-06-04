@@ -51,6 +51,7 @@ fn builds_native_request_with_thinking_and_signature_replay() {
             parameters: Default::default(),
             output_schema: None,
         })],
+        output_schema: None,
     };
 
     let request =
@@ -126,6 +127,7 @@ fn sanitizes_known_bad_tool_schema_for_gemini() {
             ),
             output_schema: None,
         })],
+        output_schema: None,
     };
 
     let request =
@@ -194,6 +196,7 @@ fn serializes_parallel_function_calls_before_results_by_call_id() {
             },
         ],
         tools: vec![weather_tool()],
+        output_schema: None,
     };
 
     let request =
@@ -235,6 +238,91 @@ fn serializes_parallel_function_calls_before_results_by_call_id() {
             }
         ])
     );
+}
+
+#[test]
+fn normalizes_system_instruction_without_truncating_content() {
+    let mut catalog = gemini_model_catalog();
+    let model_info = catalog.models.remove(0);
+    let important_middle_rule = "IMPORTANT_MIDDLE_RULE_DO_NOT_DROP";
+    let prompt = GeminiPrompt {
+        instructions: format!("\n\nfirst rule\n\n\n{important_middle_rule}\n\n\nlast rule\n\n"),
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Say ok.".to_string(),
+            }],
+            phase: None,
+        }],
+        tools: Vec::new(),
+        output_schema: None,
+    };
+
+    let request =
+        build_generate_content_request(&prompt, &model_info, Some(ReasoningEffort::Low)).unwrap();
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(
+        value["systemInstruction"]["parts"][0]["text"],
+        json!(format!(
+            "first rule\n\n{important_middle_rule}\n\nlast rule"
+        ))
+    );
+}
+
+#[test]
+fn serializes_native_response_schema_without_tools() {
+    let mut catalog = gemini_model_catalog();
+    let model_info = catalog.models.remove(0);
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "outcome": {
+                "type": "string",
+                "enum": ["allow", "deny"]
+            }
+        },
+        "required": ["outcome"]
+    });
+    let prompt = GeminiPrompt {
+        instructions: "Return structured JSON.".to_string(),
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Allow this.".to_string(),
+            }],
+            phase: None,
+        }],
+        tools: Vec::new(),
+        output_schema: Some(schema),
+    };
+
+    let request =
+        build_generate_content_request(&prompt, &model_info, Some(ReasoningEffort::Low)).unwrap();
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(
+        value["generationConfig"]["responseMimeType"],
+        json!("application/json")
+    );
+    assert_eq!(
+        value["generationConfig"]["responseSchema"],
+        json!({
+            "type": "object",
+            "properties": {
+                "outcome": {
+                    "type": "string",
+                    "enum": ["allow", "deny"]
+                }
+            },
+            "required": ["outcome"]
+        })
+    );
+    assert!(value.get("tools").is_none());
+    assert!(value.get("toolConfig").is_none());
 }
 
 fn weather_tool() -> ToolSpec {

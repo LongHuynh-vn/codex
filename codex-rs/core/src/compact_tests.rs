@@ -2,6 +2,8 @@ use super::*;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_utils_output_truncation::TruncationPolicy;
 use pretty_assertions::assert_eq;
 
 async fn process_compacted_history_with_test_session(
@@ -90,6 +92,85 @@ fn collect_user_messages_extracts_user_text_only() {
     let collected = collect_user_messages(&items);
 
     assert_eq!(vec!["first".to_string()], collected);
+}
+
+#[test]
+fn gemini_provider_does_not_use_remote_compaction_endpoint() {
+    assert!(!should_use_remote_compact_task(
+        &ModelProviderInfo::create_gemini_provider()
+    ));
+}
+
+#[tokio::test]
+async fn gemini_compaction_trim_preserves_current_turn_signature_chain() {
+    let (_session, mut turn_context) = crate::session::tests::make_session_and_context().await;
+    turn_context.model_info.context_window = Some(300);
+    turn_context.model_info.effective_context_window_percent = 100;
+    let current_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "record_step".to_string(),
+        namespace: None,
+        arguments: r#"{"step":1}"#.to_string(),
+        call_id: "current-call".to_string(),
+        thought_signature: Some("current-signature".to_string()),
+    };
+    let mut history = ContextManager::new();
+    history.record_items(
+        [
+            &user_message(&"old ".repeat(1_000)),
+            &ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "old answer".to_string(),
+                }],
+                phase: None,
+            },
+            &user_message("current request"),
+            &current_call,
+            &ResponseItem::FunctionCallOutput {
+                call_id: "current-call".to_string(),
+                output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            },
+        ],
+        TruncationPolicy::Tokens(10_000),
+    );
+    let protected_start = current_turn_start_index(history.raw_items());
+    let protected_signature_chain =
+        function_call_signature_chain_from(history.raw_items(), protected_start);
+    history.record_items(
+        [&user_message("summarize this conversation")],
+        TruncationPolicy::Tokens(10_000),
+    );
+
+    let deleted_items = trim_old_completed_turns_to_fit_context_window(
+        &mut history,
+        &turn_context,
+        &BaseInstructions {
+            text: String::new(),
+        },
+        protected_start,
+        &protected_signature_chain,
+    );
+
+    assert!(deleted_items > 0);
+    assert_eq!(
+        protected_signature_chain,
+        vec![(
+            "current-call".to_string(),
+            Some("current-signature".to_string())
+        )]
+    );
+    assert!(
+        history.raw_items().iter().any(|item| item == &current_call),
+        "current signed function call must remain after trimming"
+    );
+    assert!(
+        !history
+            .raw_items()
+            .iter()
+            .any(|item| matches!(item, ResponseItem::Message { content, .. } if content_items_to_text(content).is_some_and(|text| text.contains("old old old"))))
+    );
 }
 
 #[test]

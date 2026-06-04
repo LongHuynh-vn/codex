@@ -11,6 +11,8 @@ use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use codex_api::ApiError;
+use codex_api::RawMemory;
+use codex_api::RawMemoryMetadata;
 use codex_api::ResponseEvent;
 use codex_app_server_protocol::AuthMode;
 use codex_login::AuthManager;
@@ -23,9 +25,12 @@ use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -36,6 +41,9 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -59,6 +67,11 @@ use tracing_subscriber::layer::Context as LayerContext;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     test_model_client_with_parent(session_source, /*parent_thread_id*/ None)
@@ -78,6 +91,24 @@ fn test_model_client_with_parent(
         provider,
         session_source,
         parent_thread_id,
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*attestation_provider*/ None,
+    )
+}
+
+fn test_gemini_model_client(session_source: SessionSource) -> ModelClient {
+    let thread_id = ThreadId::new();
+    ModelClient::new(
+        /*auth_manager*/ None,
+        thread_id.into(),
+        thread_id,
+        /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        ModelProviderInfo::create_gemini_provider(),
+        session_source,
+        /*parent_thread_id*/ None,
         /*model_verbosity*/ None,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
@@ -338,6 +369,147 @@ async fn summarize_memories_returns_empty_for_empty_input() {
         .await
         .expect("empty summarize request should succeed");
     assert_eq!(output.len(), 0);
+}
+
+#[tokio::test]
+async fn summarize_memories_returns_empty_for_gemini_without_hosted_call() {
+    let client = test_gemini_model_client(SessionSource::Cli);
+    let model_info = test_model_info();
+    let session_telemetry = test_session_telemetry();
+
+    let output = client
+        .summarize_memories(
+            vec![RawMemory {
+                id: "raw-memory-1".to_string(),
+                metadata: RawMemoryMetadata {
+                    source_path: "/tmp/trace.jsonl".to_string(),
+                },
+                items: vec![json!({"type": "message", "text": "remember this"})],
+            }],
+            &model_info,
+            /*effort*/ None,
+            &session_telemetry,
+        )
+        .await
+        .expect("Gemini memory summarize should be disabled locally");
+    assert_eq!(output, Vec::new());
+}
+
+#[tokio::test]
+async fn gemini_guardian_structured_request_has_no_tools_or_codex_metadata() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-3.5-flash:streamGenerateContent"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"{\\\"outcome\\\":\\\"allow\\\"}\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut provider = ModelProviderInfo::create_gemini_provider();
+    provider.base_url = Some(server.uri());
+    provider.env_key = None;
+    provider.experimental_bearer_token = Some("mock-gemini-key".to_string());
+    let parent_thread_id = ThreadId::new();
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        parent_thread_id.into(),
+        ThreadId::new(),
+        /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        provider,
+        SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
+        Some(parent_thread_id),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ Some("feature-a".to_string()),
+        /*attestation_provider*/ None,
+    )
+    .with_prompt_cache_key_override(Some("guardian:parent-thread".to_string()));
+    let mut model_info = test_model_info();
+    model_info.slug = "gemini-3.5-flash".to_string();
+    let prompt = crate::Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Review this low-risk request.".to_string(),
+            }],
+            phase: None,
+        }],
+        tools: vec![ToolSpec::Function(ResponsesApiTool {
+            name: "probe_tool".to_string(),
+            description: "Should not be attached for Gemini guardian review.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::default(),
+            output_schema: None,
+        })],
+        base_instructions: BaseInstructions {
+            text: "Return structured JSON.".to_string(),
+        },
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "outcome": {
+                    "type": "string",
+                    "enum": ["allow", "deny"]
+                }
+            },
+            "required": ["outcome"]
+        })),
+        ..Default::default()
+    };
+
+    let mut client_session = client.new_session();
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &model_info,
+            &test_session_telemetry(),
+            Some(ReasoningEffort::Low),
+            ReasoningSummary::None,
+            /*service_tier*/ None,
+            Some(r#"{"turn_id":"turn-123"}"#),
+            &InferenceTraceContext::disabled(),
+        )
+        .await
+        .expect("Gemini guardian request should stream");
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event.expect("Gemini guardian stream event"),
+            ResponseEvent::Completed { .. }
+        ) {
+            break;
+        }
+    }
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should record request");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .headers
+            .iter()
+            .all(|(name, _)| !name.as_str().starts_with("x-codex-")),
+        "native Gemini guardian request must not include x-codex-* headers"
+    );
+    let body: serde_json::Value = requests[0]
+        .body_json()
+        .expect("Gemini guardian request body should be JSON");
+    assert_eq!(
+        body["generationConfig"]["responseMimeType"],
+        json!("application/json")
+    );
+    assert_eq!(body["generationConfig"]["temperature"], json!(1.0));
+    assert!(body["generationConfig"].get("responseSchema").is_some());
+    assert!(body.get("tools").is_none());
+    assert!(body.get("toolConfig").is_none());
+    assert!(body.get("prompt_cache_key").is_none());
+    assert!(body.get("promptCacheKey").is_none());
 }
 
 #[tokio::test]

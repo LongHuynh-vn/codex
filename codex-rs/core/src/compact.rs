@@ -4,6 +4,8 @@ use std::time::Instant;
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
+use crate::context_manager::ContextManager;
+use crate::context_manager::is_user_turn_boundary;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -27,6 +29,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -41,6 +44,7 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 use futures::prelude::*;
 use tracing::error;
+use tracing::info;
 
 use codex_model_provider_info::ModelProviderInfo;
 
@@ -185,10 +189,30 @@ async fn run_compact_task_inner_impl(
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
 
     let mut history = sess.clone_history().await;
+    let protected_start = current_turn_start_index(history.raw_items());
+    let protected_signature_chain =
+        function_call_signature_chain_from(history.raw_items(), protected_start);
     history.record_items(
         &[initial_input_for_turn.into()],
         turn_context.truncation_policy,
     );
+    let base_instructions = sess.get_base_instructions().await;
+    if turn_context.provider.info().is_gemini() {
+        let deleted_items = trim_old_completed_turns_to_fit_context_window(
+            &mut history,
+            turn_context.as_ref(),
+            &base_instructions,
+            protected_start,
+            &protected_signature_chain,
+        );
+        if deleted_items > 0 {
+            info!(
+                turn_id = %turn_context.sub_id,
+                deleted_items,
+                "trimmed older history items before Gemini local compaction"
+            );
+        }
+    }
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
@@ -205,7 +229,7 @@ async fn run_compact_task_inner_impl(
         let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
-            base_instructions: sess.get_base_instructions().await,
+            base_instructions: base_instructions.clone(),
             personality: turn_context.personality,
             ..Default::default()
         };
@@ -302,6 +326,81 @@ async fn run_compact_task_inner_impl(
     });
     sess.send_event(&turn_context, warning).await;
     Ok(summary_suffix)
+}
+
+fn trim_old_completed_turns_to_fit_context_window(
+    history: &mut ContextManager,
+    turn_context: &TurnContext,
+    base_instructions: &BaseInstructions,
+    protected_start: usize,
+    protected_signature_chain: &[(String, Option<String>)],
+) -> usize {
+    let Some(context_window) = turn_context.model_context_window() else {
+        return 0;
+    };
+
+    let mut deleted_items = 0usize;
+    let mut protected_start = protected_start.min(history.raw_items().len());
+    while history
+        .estimate_token_count_with_base_instructions(base_instructions)
+        .is_some_and(|estimated_tokens| estimated_tokens > context_window)
+    {
+        if protected_start == 0 {
+            break;
+        }
+
+        let remove_end = oldest_completed_turn_end(history.raw_items(), protected_start);
+        if remove_end == 0 || remove_end > protected_start {
+            break;
+        }
+
+        let mut items = history.raw_items().to_vec();
+        items.drain(0..remove_end);
+        history.replace(items);
+        deleted_items = deleted_items.saturating_add(remove_end);
+        protected_start = protected_start.saturating_sub(remove_end);
+    }
+
+    debug_assert_eq!(
+        protected_signature_chain,
+        function_call_signature_chain_from(history.raw_items(), protected_start)
+    );
+    deleted_items
+}
+
+fn oldest_completed_turn_end(items: &[ResponseItem], protected_start: usize) -> usize {
+    items
+        .iter()
+        .enumerate()
+        .skip(1)
+        .take(protected_start.saturating_sub(1))
+        .find_map(|(index, item)| is_user_turn_boundary(item).then_some(index))
+        .unwrap_or(protected_start)
+}
+
+fn current_turn_start_index(items: &[ResponseItem]) -> usize {
+    items
+        .iter()
+        .rposition(is_user_turn_boundary)
+        .unwrap_or(items.len())
+}
+
+fn function_call_signature_chain_from(
+    items: &[ResponseItem],
+    start: usize,
+) -> Vec<(String, Option<String>)> {
+    items
+        .iter()
+        .skip(start)
+        .filter_map(|item| match item {
+            ResponseItem::FunctionCall {
+                call_id,
+                thought_signature,
+                ..
+            } => Some((call_id.clone(), thought_signature.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) struct CompactionAnalyticsAttempt {

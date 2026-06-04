@@ -26,6 +26,10 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
         return Ok(arguments_value);
     };
 
+    if turn_context.provider.info().is_gemini() {
+        return Ok(arguments_value);
+    }
+
     let Some(arguments_value) = arguments_value else {
         return Ok(None);
     };
@@ -141,6 +145,10 @@ async fn build_uploaded_local_argument_value(
 mod tests {
     use super::*;
     use crate::session::tests::make_session_and_context;
+    use codex_model_provider::create_model_provider;
+    use codex_model_provider_info::ModelProviderInfo;
+    use codex_model_provider_info::WireApi;
+    use codex_model_provider_info::create_oss_provider_with_base_url;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
@@ -161,6 +169,29 @@ mod tests {
         )
         .await
         .expect("rewrite should succeed");
+
+        assert_eq!(rewritten, arguments);
+    }
+
+    #[tokio::test]
+    async fn gemini_leaves_declared_file_params_as_local_arguments() {
+        let (session, mut turn_context) = make_session_and_context().await;
+        turn_context.provider = create_model_provider(
+            ModelProviderInfo::create_gemini_provider(),
+            Some(session.services.auth_manager.clone()),
+        );
+        let arguments = Some(serde_json::json!({
+            "file": "file_report.csv"
+        }));
+
+        let rewritten = rewrite_mcp_tool_arguments_for_openai_files(
+            &session,
+            &Arc::new(turn_context),
+            arguments.clone(),
+            Some(&["file".to_string()]),
+        )
+        .await
+        .expect("Gemini should keep local file arguments");
 
         assert_eq!(rewritten, arguments);
     }
@@ -460,9 +491,13 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_mcp_tool_arguments_for_openai_files_surfaces_upload_failures() {
-        let (mut session, turn_context) = make_session_and_context().await;
+        let (mut session, mut turn_context) = make_session_and_context().await;
         session.services.auth_manager = crate::test_support::auth_manager_from_auth(
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        );
+        turn_context.provider = create_model_provider(
+            create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses),
+            Some(session.services.auth_manager.clone()),
         );
         let error = rewrite_mcp_tool_arguments_for_openai_files(
             &session,

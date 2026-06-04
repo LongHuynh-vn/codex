@@ -21,6 +21,7 @@ use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 use super::*;
 
@@ -86,6 +87,20 @@ async fn mocked_native_gemini_round_trips_function_call_signature() {
     let second_body: Value = requests[1]
         .body_json()
         .expect("second Gemini request body should be JSON");
+    for request in &requests {
+        assert!(
+            request
+                .headers
+                .iter()
+                .all(|(name, _)| !name.as_str().starts_with("x-codex-")),
+            "native Gemini requests must not include x-codex-* headers"
+        );
+        let body: Value = request
+            .body_json()
+            .expect("Gemini request body should be JSON");
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("promptCacheKey").is_none());
+    }
 
     assert_eq!(
         requests[0].url.path(),
@@ -134,6 +149,90 @@ async fn mocked_native_gemini_round_trips_function_call_signature() {
     assert_eq!(
         second_body["contents"][2]["parts"][0]["functionResponse"],
         json!({"name": "record_step", "response": {"output": "recorded step 1"}})
+    );
+}
+
+#[tokio::test]
+async fn mocked_gemini_per_day_quota_falls_back_to_pro() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/models/{GEMINI_3_5_FLASH_MODEL}:streamGenerateContent"
+        )))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "message": "Quota exceeded.",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [{
+                        "quotaId": "GenerateRequestsPerDayPerProject"
+                    }]
+                }]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/models/{GEMINI_3_1_PRO_PREVIEW_MODEL}:streamGenerateContent"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut provider = ModelProviderInfo::create_gemini_provider();
+    provider.base_url = Some(server.uri());
+    provider.env_key = None;
+    provider.experimental_bearer_token = Some("mock-gemini-key".to_string());
+    let model_info = model_config::gemini_model_catalog()
+        .models
+        .into_iter()
+        .find(|model| model.slug == GEMINI_3_5_FLASH_MODEL)
+        .expect("gemini flash model");
+    let prompt = GeminiPrompt {
+        instructions: "Reply done.".to_string(),
+        input: vec![user_message("Reply done.")],
+        tools: Vec::new(),
+        output_schema: None,
+    };
+
+    let mut stream = stream_generate_content(
+        reqwest::Client::new(),
+        &provider,
+        &model_info,
+        prompt,
+        Some(ReasoningEffort::Low),
+    )
+    .await
+    .expect("fallback stream should start");
+    while let Some(event) = stream.recv().await {
+        if matches!(
+            event.expect("mock fallback stream event"),
+            ResponseEvent::Completed { .. }
+        ) {
+            break;
+        }
+    }
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should record requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].url.path(),
+        format!("/models/{GEMINI_3_5_FLASH_MODEL}:streamGenerateContent")
+    );
+    assert_eq!(
+        requests[1].url.path(),
+        format!("/models/{GEMINI_3_1_PRO_PREVIEW_MODEL}:streamGenerateContent")
     );
 }
 
@@ -239,6 +338,7 @@ async fn live_gemini_accepts_sanitized_complex_schema_when_auth_is_set() {
             "Do not call the tool. Reply with the word done.",
         )],
         tools: vec![complex_schema_tool()],
+        output_schema: None,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -274,6 +374,86 @@ async fn live_gemini_accepts_sanitized_complex_schema_when_auth_is_set() {
 }
 
 #[tokio::test]
+async fn live_gemini_accepts_guardian_structured_output_when_auth_is_set() {
+    if !live_auth_configured() {
+        eprintln!(
+            "skipping live Gemini guardian structured-output smoke test: configure GEMINI_API_KEY or Vertex ADC env vars"
+        );
+        return;
+    }
+
+    let provider = ModelProviderInfo::create_gemini_provider();
+    let model_info = model_config::gemini_model_catalog()
+        .models
+        .into_iter()
+        .find(|model| model.slug == GEMINI_3_5_FLASH_MODEL)
+        .expect("gemini flash model");
+    let prompt = GeminiPrompt {
+        instructions: "You are running a guardian structured-output smoke test. Return only JSON."
+            .to_string(),
+        input: vec![user_message(
+            "Return {\"outcome\":\"allow\"} for this low-risk request.",
+        )],
+        tools: Vec::new(),
+        output_schema: Some(json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "risk_level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "critical"]
+                },
+                "user_authorization": {
+                    "type": "string",
+                    "enum": ["unknown", "low", "medium", "high"]
+                },
+                "outcome": {
+                    "type": "string",
+                    "enum": ["allow", "deny"]
+                },
+                "rationale": {
+                    "type": "string"
+                }
+            },
+            "required": ["outcome"]
+        })),
+    };
+    let request = request_translator::build_generate_content_request(
+        &prompt,
+        &model_info,
+        Some(ReasoningEffort::Low),
+    )
+    .expect("guardian structured request should build");
+    let request_value = serde_json::to_value(&request).expect("request JSON");
+    assert_eq!(
+        request_value["generationConfig"]["responseMimeType"],
+        json!("application/json")
+    );
+    assert!(
+        request_value["generationConfig"]
+            .get("responseSchema")
+            .is_some()
+    );
+    assert!(request_value.get("tools").is_none());
+    assert!(request_value.get("toolConfig").is_none());
+
+    let response = send_live_generate_content(
+        &provider,
+        &model_info,
+        &request,
+        &request_value,
+        "LIVE_GEMINI_GUARDIAN_SCHEMA",
+    )
+    .await;
+    let structured_turn = collect_live_response(response, "LIVE_GEMINI_GUARDIAN_SCHEMA")
+        .await
+        .expect("live guardian structured response should stream");
+    let parsed: Value =
+        serde_json::from_str(&structured_turn.text).expect("guardian response should be JSON");
+    assert_eq!(parsed["outcome"], json!("allow"));
+}
+
+#[tokio::test]
 async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set() {
     if !live_auth_configured() {
         eprintln!(
@@ -296,6 +476,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         instructions: "You are running a parallel function-calling smoke test.".to_string(),
         input: input.clone(),
         tools: tools.clone(),
+        output_schema: None,
     };
     let first_request = request_translator::build_generate_content_request(
         &first_prompt,
@@ -339,6 +520,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         instructions: "You are running a parallel function-calling smoke test.".to_string(),
         input,
         tools,
+        output_schema: None,
     };
     let follow_up_request = request_translator::build_generate_content_request(
         &follow_up_prompt,
@@ -386,6 +568,7 @@ struct LiveGeminiTurn {
 struct LiveGeminiResponse {
     calls: Vec<ResponseItem>,
     token_usage: Option<TokenUsage>,
+    text: String,
 }
 
 async fn send_live_generate_content<T: Serialize + ?Sized>(
@@ -450,6 +633,7 @@ async fn collect_live_response(
 
     let mut calls = Vec::new();
     let mut token_usage = None;
+    let mut text = String::new();
     for event in accumulator.finish()? {
         match event {
             ResponseEvent::OutputItemDone(item @ ResponseItem::FunctionCall { .. }) => {
@@ -458,6 +642,18 @@ async fn collect_live_response(
                     serde_json::to_string_pretty(&item)?
                 );
                 calls.push(item);
+            }
+            ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) => {
+                for item in content {
+                    match item {
+                        ContentItem::InputText { text: item_text }
+                        | ContentItem::OutputText { text: item_text } => {
+                            text.push_str(&item_text);
+                        }
+                        ContentItem::InputImage { .. } => {}
+                    }
+                }
+                eprintln!("{label}_CODEX_TEXT {text}");
             }
             ResponseEvent::Completed {
                 token_usage: usage, ..
@@ -471,7 +667,11 @@ async fn collect_live_response(
             _ => {}
         }
     }
-    Ok(LiveGeminiResponse { calls, token_usage })
+    Ok(LiveGeminiResponse {
+        calls,
+        token_usage,
+        text,
+    })
 }
 
 async fn live_next_function_call(
@@ -486,6 +686,7 @@ async fn live_next_function_call(
             .to_string(),
         input,
         tools,
+        output_schema: None,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -728,6 +929,7 @@ async fn next_function_call(
         instructions: "You are running a mock smoke test.".to_string(),
         input,
         tools,
+        output_schema: None,
     };
     let mut stream = stream_generate_content(
         reqwest::Client::new(),
