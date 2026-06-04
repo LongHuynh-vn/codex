@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::GeminiPrompt;
+use crate::GeminiToolChoice;
 use crate::schema_sanitizer;
 use crate::signature_store::SignatureStore;
 use crate::tool_translator;
@@ -126,11 +127,21 @@ pub(crate) fn build_generate_content_request(
     }
 
     let tools = tool_translator::build_tools(&prompt.tools)?;
-    let tool_config = tools.as_ref().map(|_| ToolConfig {
-        function_calling_config: FunctionCallingConfig {
-            mode: "AUTO".to_string(),
-            allowed_function_names: None,
-        },
+    let tool_config = tools.as_ref().map(|_| {
+        let (mode, allowed_function_names) = match &prompt.tool_choice {
+            GeminiToolChoice::Any {
+                allowed_function_names,
+            } if prompt.output_schema.is_none() => {
+                ("ANY".to_string(), Some(allowed_function_names.clone()))
+            }
+            GeminiToolChoice::Auto | GeminiToolChoice::Any { .. } => ("AUTO".to_string(), None),
+        };
+        ToolConfig {
+            function_calling_config: FunctionCallingConfig {
+                mode,
+                allowed_function_names,
+            },
+        }
     });
     let output_schema = prompt
         .output_schema

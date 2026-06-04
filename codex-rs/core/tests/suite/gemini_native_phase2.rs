@@ -57,12 +57,12 @@ impl Drop for EnvVarGuard {
 }
 
 #[derive(Clone, Debug)]
-struct GeminiRequestLog {
+pub(super) struct GeminiRequestLog {
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
 impl GeminiRequestLog {
-    fn requests(&self) -> Vec<Value> {
+    pub(super) fn requests(&self) -> Vec<Value> {
         self.requests.lock().expect("request log lock").clone()
     }
 }
@@ -89,7 +89,7 @@ impl Respond for GeminiSseResponder {
     }
 }
 
-async fn mount_gemini_sse_sequence(
+pub(super) async fn mount_gemini_sse_sequence(
     server: &MockServer,
     responses: Vec<String>,
 ) -> GeminiRequestLog {
@@ -113,7 +113,7 @@ async fn mount_gemini_sse_sequence(
     GeminiRequestLog { requests }
 }
 
-fn gemini_builder() -> TestCodexBuilder {
+pub(super) fn gemini_builder() -> TestCodexBuilder {
     test_codex().with_config(|config| {
         let mut provider = ModelProviderInfo::create_gemini_provider();
         provider.base_url = config.model_provider.base_url.clone();
@@ -136,7 +136,11 @@ fn gemini_sse(chunks: Vec<Value>) -> String {
     body
 }
 
-fn gemini_function_call_sse(name: &str, args: Value, thought_signature: Option<&str>) -> String {
+pub(super) fn gemini_function_call_sse(
+    name: &str,
+    args: Value,
+    thought_signature: Option<&str>,
+) -> String {
     gemini_function_calls_sse(vec![(name, args, thought_signature)])
 }
 
@@ -174,7 +178,7 @@ fn gemini_function_calls_sse(calls: Vec<(&str, Value, Option<&str>)>) -> String 
     })])
 }
 
-fn gemini_text_sse(text: &str) -> String {
+pub(super) fn gemini_text_sse(text: &str) -> String {
     gemini_sse(vec![json!({
         "candidates": [{
             "content": {

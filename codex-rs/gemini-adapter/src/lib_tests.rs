@@ -4,6 +4,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::TokenUsage;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
@@ -24,6 +25,18 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 use super::*;
+use crate::GeminiToolChoice;
+
+#[test]
+fn gemini_catalog_uses_flat_multi_agent_v2_tools() {
+    let model_info = model_config::gemini_model_catalog()
+        .models
+        .into_iter()
+        .find(|model| model.slug == GEMINI_3_5_FLASH_MODEL)
+        .expect("gemini flash model");
+
+    assert_eq!(model_info.multi_agent_version, Some(MultiAgentVersion::V2));
+}
 
 #[tokio::test]
 async fn mocked_native_gemini_round_trips_function_call_signature() {
@@ -201,6 +214,7 @@ async fn mocked_gemini_per_day_quota_falls_back_to_pro() {
         input: vec![user_message("Reply done.")],
         tools: Vec::new(),
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
 
     let mut stream = stream_generate_content(
@@ -339,6 +353,7 @@ async fn live_gemini_accepts_sanitized_complex_schema_when_auth_is_set() {
         )],
         tools: vec![complex_schema_tool()],
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -417,6 +432,7 @@ async fn live_gemini_accepts_guardian_structured_output_when_auth_is_set() {
             },
             "required": ["outcome"]
         })),
+        tool_choice: GeminiToolChoice::Auto,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -477,6 +493,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         input: input.clone(),
         tools: tools.clone(),
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
     let first_request = request_translator::build_generate_content_request(
         &first_prompt,
@@ -521,6 +538,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         input,
         tools,
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
     let follow_up_request = request_translator::build_generate_content_request(
         &follow_up_prompt,
@@ -687,6 +705,7 @@ async fn live_next_function_call(
         input,
         tools,
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -930,6 +949,7 @@ async fn next_function_call(
         input,
         tools,
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
     let mut stream = stream_generate_content(
         reqwest::Client::new(),

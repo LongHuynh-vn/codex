@@ -43,6 +43,12 @@ filter = 'package(codex-app-server) & kind(test)'
 test-group = 'app_server_integration'
 
 [[profile.default.overrides]]
+# Live Gemini subagent orchestration uses several external model calls and can
+# legitimately run for several minutes while proving real parent/child behavior.
+filter = 'package(codex-core) & test(live_gemini_subagents_spawn_wait_and_complete)'
+slow-timeout = { period = "1m", terminate-after = 5 }
+
+[[profile.default.overrides]]
 # These tests exercise full Codex turns and apply_patch execution, and they are
 # sensitive to Windows runner process-startup stalls when many cases launch at once.
 filter = 'package(codex-core) & kind(test) & test(apply_patch_cli)'

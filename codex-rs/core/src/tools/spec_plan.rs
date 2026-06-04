@@ -96,6 +96,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
+const GEMINI_MULTI_AGENT_V2_USAGE_HINT: &str = "Gemini subagent guidance: after spawning multiple agents, keep calling `wait_agent` until you have received a final-status notification for every spawned task. Do not produce the final answer after only the first child completes.";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -403,6 +404,10 @@ fn is_hidden_by_code_mode_only(
     tool_name: &ToolName,
     exposure: ToolExposure,
 ) -> bool {
+    if turn_context.provider.info().wire_api == WireApi::GeminiNative {
+        return false;
+    }
+
     turn_context.tool_mode == ToolMode::CodeModeOnly
         && exposure != ToolExposure::DirectModelOnly
         && codex_code_mode::is_code_mode_nested_tool(&codex_tools::code_mode_name_for_tool_name(
@@ -419,6 +424,9 @@ fn build_code_mode_executors(
         turn_context.tool_mode,
         ToolMode::CodeMode | ToolMode::CodeModeOnly
     ) {
+        return vec![];
+    }
+    if turn_context.provider.info().wire_api == WireApi::GeminiNative {
         return vec![];
     }
 
@@ -708,6 +716,20 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 .flatten();
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
+            let usage_hint_text = if turn_context.provider.info().wire_api == WireApi::GeminiNative
+            {
+                Some(
+                    turn_context
+                        .config
+                        .multi_agent_v2
+                        .usage_hint_text
+                        .as_deref()
+                        .map(|hint| format!("{hint}\n{GEMINI_MULTI_AGENT_V2_USAGE_HINT}"))
+                        .unwrap_or_else(|| GEMINI_MULTI_AGENT_V2_USAGE_HINT.to_string()),
+                )
+            } else {
+                turn_context.config.multi_agent_v2.usage_hint_text.clone()
+            };
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(
                     SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
@@ -718,7 +740,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                             .multi_agent_v2
                             .hide_spawn_agent_metadata,
                         include_usage_hint: turn_context.config.multi_agent_v2.usage_hint_enabled,
-                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                        usage_hint_text,
                         max_concurrent_threads_per_session: max_concurrent_threads_per_session(
                             turn_context,
                         ),

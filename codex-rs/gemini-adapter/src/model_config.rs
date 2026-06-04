@@ -68,7 +68,7 @@ fn gemini_model(slug: &str, display_name: &str, context_window: i64, priority: i
         supports_search_tool: false,
         auto_review_model_override: None,
         tool_mode: None,
-        multi_agent_version: Some(MultiAgentVersion::V1),
+        multi_agent_version: Some(MultiAgentVersion::V2),
     }
 }
 

@@ -31,6 +31,12 @@ pub use auth::GOOGLE_GENAI_USE_VERTEXAI_ENV_VAR;
 pub use model_config::GEMINI_3_1_PRO_PREVIEW_MODEL;
 pub use model_config::GEMINI_3_5_FLASH_MODEL;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeminiToolChoice {
+    Auto,
+    Any { allowed_function_names: Vec<String> },
+}
+
 /// Phase-1 Gemini prompt data, kept independent from codex-core's Prompt type.
 #[derive(Debug, Clone)]
 pub struct GeminiPrompt {
@@ -38,6 +44,7 @@ pub struct GeminiPrompt {
     pub input: Vec<ResponseItem>,
     pub tools: Vec<ToolSpec>,
     pub output_schema: Option<Value>,
+    pub tool_choice: GeminiToolChoice,
 }
 
 pub async fn stream_generate_content(

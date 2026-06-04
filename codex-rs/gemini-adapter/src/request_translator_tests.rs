@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::GeminiPrompt;
+use crate::GeminiToolChoice;
 use crate::model_config::gemini_model_catalog;
 
 #[test]
@@ -52,6 +53,7 @@ fn builds_native_request_with_thinking_and_signature_replay() {
             output_schema: None,
         })],
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
 
     let request =
@@ -128,6 +130,7 @@ fn sanitizes_known_bad_tool_schema_for_gemini() {
             output_schema: None,
         })],
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
 
     let request =
@@ -197,6 +200,7 @@ fn serializes_parallel_function_calls_before_results_by_call_id() {
         ],
         tools: vec![weather_tool()],
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
 
     let request =
@@ -257,6 +261,7 @@ fn normalizes_system_instruction_without_truncating_content() {
         }],
         tools: Vec::new(),
         output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
     };
 
     let request =
@@ -298,6 +303,7 @@ fn serializes_native_response_schema_without_tools() {
         }],
         tools: Vec::new(),
         output_schema: Some(schema),
+        tool_choice: GeminiToolChoice::Auto,
     };
 
     let request =
@@ -323,6 +329,98 @@ fn serializes_native_response_schema_without_tools() {
     );
     assert!(value.get("tools").is_none());
     assert!(value.get("toolConfig").is_none());
+}
+
+#[test]
+fn serializes_any_function_calling_config_for_plan_mode_fallback() {
+    let mut catalog = gemini_model_catalog();
+    let model_info = catalog.models.remove(0);
+    let prompt = GeminiPrompt {
+        instructions: String::new(),
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Ask for clarification.".to_string(),
+            }],
+            phase: None,
+        }],
+        tools: vec![ToolSpec::Function(ResponsesApiTool {
+            name: "request_user_input".to_string(),
+            description: "Ask the user for clarification.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: Default::default(),
+            output_schema: None,
+        })],
+        output_schema: None,
+        tool_choice: GeminiToolChoice::Any {
+            allowed_function_names: vec![
+                "request_user_input".to_string(),
+                "propose_plan".to_string(),
+            ],
+        },
+    };
+
+    let request =
+        build_generate_content_request(&prompt, &model_info, Some(ReasoningEffort::Low)).unwrap();
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(
+        value["toolConfig"]["functionCallingConfig"],
+        json!({
+            "mode": "ANY",
+            "allowedFunctionNames": ["request_user_input", "propose_plan"]
+        })
+    );
+}
+
+#[test]
+fn structured_output_never_uses_forced_any_tool_config() {
+    let mut catalog = gemini_model_catalog();
+    let model_info = catalog.models.remove(0);
+    let prompt = GeminiPrompt {
+        instructions: String::new(),
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Return JSON.".to_string(),
+            }],
+            phase: None,
+        }],
+        tools: vec![ToolSpec::Function(ResponsesApiTool {
+            name: "request_user_input".to_string(),
+            description: "Ask the user for clarification.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: Default::default(),
+            output_schema: None,
+        })],
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"}
+            },
+            "required": ["ok"]
+        })),
+        tool_choice: GeminiToolChoice::Any {
+            allowed_function_names: vec!["request_user_input".to_string()],
+        },
+    };
+
+    let request =
+        build_generate_content_request(&prompt, &model_info, Some(ReasoningEffort::Low)).unwrap();
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(
+        value["toolConfig"]["functionCallingConfig"],
+        json!({"mode": "AUTO"})
+    );
+    assert_eq!(
+        value["generationConfig"]["responseMimeType"],
+        json!("application/json")
+    );
 }
 
 fn weather_tool() -> ToolSpec {

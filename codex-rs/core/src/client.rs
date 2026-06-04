@@ -147,6 +147,7 @@ const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const GEMINI_SUBAGENT_COORDINATION_INSTRUCTIONS: &str = "Gemini subagent coordination: after spawning multiple agents, do not produce the final answer until you have received a final-status notification for every spawned task. If any spawned task is still active, running, or pending, call `wait_agent` again.";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
 // period between stream events.
 const COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER: u32 = 4;
@@ -1374,15 +1375,29 @@ impl ModelClientSession {
             } else {
                 prompt.tools.clone()
             };
+        let mut instructions = prompt.base_instructions.text.clone();
+        if tools.iter().any(|tool| {
+            matches!(
+                tool,
+                codex_tools::ToolSpec::Function(function)
+                    if function.name == "spawn_agent" || function.name == "wait_agent"
+            )
+        }) {
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(GEMINI_SUBAGENT_COORDINATION_INSTRUCTIONS);
+        }
         let rx = codex_gemini_adapter::stream_generate_content(
             build_reqwest_client(),
             self.client.state.provider.info(),
             model_info,
             GeminiPrompt {
-                instructions: prompt.base_instructions.text.clone(),
+                instructions,
                 input: prompt.get_formatted_input(),
                 tools,
                 output_schema: prompt.output_schema.clone(),
+                tool_choice: codex_gemini_adapter::GeminiToolChoice::Auto,
             },
             effort,
         )
