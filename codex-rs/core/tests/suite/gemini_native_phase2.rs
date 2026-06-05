@@ -362,8 +362,9 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
         "Gemini systemInstruction must include research diligence marker once: {instructions}"
     );
     assert!(
-        instructions.contains("Ground every specific figure in retrieved results")
-            && instructions.contains("cross-check with a second source or web_fetch"),
+        instructions.contains("wrong source or entity")
+            && instructions.contains("not reported")
+            && instructions.contains("unavailable rather than guessing"),
         "Gemini systemInstruction must include research grounding guidance: {instructions}"
     );
 
