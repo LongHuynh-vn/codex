@@ -106,6 +106,7 @@ impl ChatWidget {
             }),
             transcript: TranscriptState::new(active_cell),
             raw_output_mode: config.tui_raw_output_mode,
+            gemini_thinking_visible: Arc::new(AtomicBool::new(config.show_gemini_thought_summary)),
             config,
             effective_service_tier,
             skills_all: Vec::new(),

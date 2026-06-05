@@ -109,6 +109,24 @@ impl ChatWidget {
             }
             ThreadItem::Plan { text, .. } => self.on_plan_item_completed(text),
             ThreadItem::Reasoning {
+                id,
+                summary,
+                content,
+            } if id.starts_with(GEMINI_REASONING_ID_PREFIX) => {
+                let text = if summary.is_empty() {
+                    content.join("\n\n")
+                } else {
+                    summary.join("\n\n")
+                };
+                if !text.trim().is_empty() {
+                    self.add_boxed_history(Box::new(history_cell::GeminiThinkingCell::new(
+                        text,
+                        &self.config.cwd,
+                        Arc::clone(&self.gemini_thinking_visible),
+                    )));
+                }
+            }
+            ThreadItem::Reasoning {
                 summary, content, ..
             } => {
                 if from_replay {

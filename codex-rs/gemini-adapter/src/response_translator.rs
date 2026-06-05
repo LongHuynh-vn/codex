@@ -9,8 +9,6 @@ use serde_json::Value;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use crate::GeminiThoughtSummaryDisplay;
-
 static NEXT_RESPONSE_CALL_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -22,7 +20,6 @@ pub(crate) struct StreamAccumulator {
     usage: Option<TokenUsage>,
     finished: bool,
     emitted: bool,
-    thought_summary_display: GeminiThoughtSummaryDisplay,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +77,7 @@ struct UsageMetadata {
 }
 
 impl StreamAccumulator {
-    pub(crate) fn new(thought_summary_display: GeminiThoughtSummaryDisplay) -> Self {
+    pub(crate) fn new(_thought_summary_display: crate::GeminiThoughtSummaryDisplay) -> Self {
         Self {
             text: String::new(),
             thought_text: String::new(),
@@ -89,7 +86,6 @@ impl StreamAccumulator {
             usage: None,
             finished: false,
             emitted: false,
-            thought_summary_display,
         }
     }
 
@@ -195,22 +191,12 @@ impl StreamAccumulator {
         if !has_thought_text && !has_signature {
             return None;
         }
-        if matches!(
-            self.thought_summary_display,
-            GeminiThoughtSummaryDisplay::Hidden
-        ) && !has_signature
-        {
-            return None;
-        }
-
-        let summary = match self.thought_summary_display {
-            GeminiThoughtSummaryDisplay::Hidden => Vec::new(),
-            GeminiThoughtSummaryDisplay::Visible if has_thought_text => {
-                vec![ReasoningItemReasoningSummary::SummaryText {
-                    text: self.thought_text.clone(),
-                }]
-            }
-            GeminiThoughtSummaryDisplay::Visible => Vec::new(),
+        let summary = if has_thought_text {
+            vec![ReasoningItemReasoningSummary::SummaryText {
+                text: self.thought_text.clone(),
+            }]
+        } else {
+            Vec::new()
         };
 
         Some(ResponseItem::Reasoning {
@@ -224,7 +210,7 @@ impl StreamAccumulator {
 
 impl Default for StreamAccumulator {
     fn default() -> Self {
-        Self::new(GeminiThoughtSummaryDisplay::Hidden)
+        Self::new(crate::GeminiThoughtSummaryDisplay::Hidden)
     }
 }
 

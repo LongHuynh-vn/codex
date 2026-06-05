@@ -60,7 +60,7 @@ fn accumulates_stream_until_finish_reason_and_captures_signature_usage() {
 }
 
 #[test]
-fn hides_thought_text_from_assistant_message_by_default() {
+fn retains_thought_text_in_reasoning_item_by_default() {
     let mut accumulator = StreamAccumulator::default();
 
     accumulator
@@ -70,8 +70,26 @@ fn hides_thought_text_from_assistant_message_by_default() {
         .unwrap();
 
     let events = accumulator.finish().unwrap();
-    assert_eq!(events.len(), 2);
-    let ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) = &events[0] else {
+    assert_eq!(events.len(), 3);
+    let ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+        summary,
+        content,
+        encrypted_content,
+        ..
+    }) = &events[0]
+    else {
+        panic!("expected reasoning item");
+    };
+    assert_eq!(
+        summary,
+        &vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "private reasoning".to_string()
+        }]
+    );
+    assert_eq!(content, &None);
+    assert_eq!(encrypted_content, &None);
+
+    let ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) = &events[1] else {
         panic!("expected visible assistant message");
     };
     assert_eq!(
@@ -134,12 +152,16 @@ fn thought_part_signature_after_unsigned_function_call_stays_on_call() {
         .unwrap();
 
     let events = accumulator.finish().unwrap();
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        events[0],
+        ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. })
+    ));
     let ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
         name,
         thought_signature,
         ..
-    }) = &events[0]
+    }) = &events[1]
     else {
         panic!("expected function call");
     };
@@ -148,7 +170,7 @@ fn thought_part_signature_after_unsigned_function_call_stays_on_call() {
 }
 
 #[test]
-fn standalone_thought_part_signature_is_preserved_when_text_is_hidden() {
+fn standalone_thought_part_signature_is_preserved_with_summary() {
     let mut accumulator = StreamAccumulator::default();
 
     accumulator
@@ -168,7 +190,12 @@ fn standalone_thought_part_signature_is_preserved_when_text_is_hidden() {
     else {
         panic!("expected reasoning item for standalone signature");
     };
-    assert_eq!(summary, &Vec::<ReasoningItemReasoningSummary>::new());
+    assert_eq!(
+        summary,
+        &vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "private reasoning".to_string()
+        }]
+    );
     assert_eq!(content, &None);
     assert_eq!(encrypted_content.as_deref(), Some("sig-standalone"));
 }

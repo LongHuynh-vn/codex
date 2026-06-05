@@ -962,6 +962,68 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
 }
 
 #[tokio::test]
+async fn live_gemini_reasoning_item_is_retained_and_hidden_by_default() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: AppServerThreadItem::Reasoning {
+                id: "gemini-reasoning-1".to_string(),
+                summary: vec!["Gemini private thinking".to_string()],
+                content: Vec::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected InsertHistoryCell, got {other:?}"),
+    };
+    assert!(cell.display_lines(/*width*/ 80).is_empty());
+    assert!(cell.transcript_lines(/*width*/ 80).is_empty());
+
+    chat.set_gemini_thinking_visible_and_notify(/*enabled*/ true);
+    let _ = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+    assert!(rendered.contains("Gemini private thinking"));
+
+    chat.set_gemini_thinking_visible_and_notify(/*enabled*/ false);
+    let _ = drain_insert_history(&mut rx);
+    assert!(cell.display_lines(/*width*/ 80).is_empty());
+}
+
+#[tokio::test]
+async fn replayed_gemini_reasoning_item_uses_gemini_visibility_toggle() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let _ = drain_insert_history(&mut rx);
+
+    chat.replay_thread_item(
+        AppServerThreadItem::Reasoning {
+            id: "gemini-reasoning-1".to_string(),
+            summary: vec!["Gemini replayed thinking".to_string()],
+            content: Vec::new(),
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshot,
+    );
+
+    let cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected InsertHistoryCell, got {other:?}"),
+    };
+    assert!(cell.transcript_lines(/*width*/ 80).is_empty());
+
+    chat.set_gemini_thinking_visible_and_notify(/*enabled*/ true);
+    let _ = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(&cell.transcript_lines(/*width*/ 80));
+    assert!(rendered.contains("Gemini replayed thinking"));
+}
+
+#[tokio::test]
 async fn replayed_in_progress_mcp_tool_call_stays_active() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let _ = drain_insert_history(&mut rx);

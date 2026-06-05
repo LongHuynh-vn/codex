@@ -2833,6 +2833,7 @@
               "queue": null,
               "submit": null,
               "toggle_fast_mode": null,
+              "toggle_gemini_thinking": null,
               "toggle_raw_output": null,
               "toggle_shortcuts": null,
               "toggle_vim_mode": null
@@ -3388,6 +3389,14 @@
           ],
           "description": "Toggle Fast mode."
         },
+        "toggle_gemini_thinking": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Toggle Gemini thinking summaries in the transcript."
+        },
         "toggle_raw_output": {
           "allOf": [
             {
@@ -3503,6 +3512,7 @@
             "queue": null,
             "submit": null,
             "toggle_fast_mode": null,
+            "toggle_gemini_thinking": null,
             "toggle_raw_output": null,
             "toggle_shortcuts": null,
             "toggle_vim_mode": null
@@ -5139,7 +5149,7 @@
       }
     },
     "show_gemini_thought_summary": {
-      "description": "When set to `true`, Gemini thought summaries will be shown in the reasoning UI/output. Defaults to `false`.",
+      "description": "When set to `true`, Gemini thought summaries are initially shown in the TUI. Defaults to `false`.",
       "type": "boolean"
     },
     "show_raw_agent_reasoning": {

@@ -69,6 +69,8 @@ pub(crate) struct AppKeymap {
     pub(crate) toggle_fast_mode: Vec<KeyBinding>,
     /// Toggle raw scrollback mode for copy-friendly transcript selection.
     pub(crate) toggle_raw_output: Vec<KeyBinding>,
+    /// Toggle Gemini thinking summaries in the transcript.
+    pub(crate) toggle_gemini_thinking: Vec<KeyBinding>,
 }
 
 /// Chat-level keybindings evaluated at the app event layer.
@@ -420,6 +422,11 @@ impl RuntimeKeymap {
                 keymap.global.toggle_raw_output.as_ref(),
                 &defaults.app.toggle_raw_output,
                 "tui.keymap.global.toggle_raw_output",
+            )?,
+            toggle_gemini_thinking: resolve_bindings(
+                keymap.global.toggle_gemini_thinking.as_ref(),
+                &defaults.app.toggle_gemini_thinking,
+                "tui.keymap.global.toggle_gemini_thinking",
             )?,
         };
 
@@ -792,6 +799,10 @@ impl RuntimeKeymap {
                 keymap.global.toggle_raw_output.as_ref(),
                 app.toggle_raw_output.as_slice(),
             ),
+            (
+                keymap.global.toggle_gemini_thinking.as_ref(),
+                app.toggle_gemini_thinking.as_slice(),
+            ),
             (keymap.list.move_up.as_ref(), list_move_up.as_slice()),
             (keymap.list.move_down.as_ref(), list_move_down.as_slice()),
             (keymap.list.accept.as_ref(), list_accept.as_slice()),
@@ -899,6 +910,7 @@ impl RuntimeKeymap {
                 toggle_vim_mode: default_bindings![],
                 toggle_fast_mode: default_bindings![],
                 toggle_raw_output: default_bindings![alt(KeyCode::Char('r'))],
+                toggle_gemini_thinking: default_bindings![alt(KeyCode::Char('t'))],
             },
             chat: ChatKeymap {
                 interrupt_turn: default_bindings![plain(KeyCode::Esc)],
@@ -1152,6 +1164,10 @@ impl RuntimeKeymap {
                 ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
+                (
+                    "toggle_gemini_thinking",
+                    self.app.toggle_gemini_thinking.as_slice(),
+                ),
                 ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
                 (
                     "chat.decrease_reasoning_effort",
@@ -1195,6 +1211,10 @@ impl RuntimeKeymap {
                 ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
+                (
+                    "toggle_gemini_thinking",
+                    self.app.toggle_gemini_thinking.as_slice(),
+                ),
                 ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
                 (
                     "chat.decrease_reasoning_effort",
@@ -1244,6 +1264,10 @@ impl RuntimeKeymap {
                 ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
+                (
+                    "toggle_gemini_thinking",
+                    self.app.toggle_gemini_thinking.as_slice(),
+                ),
             ],
             [
                 ("list.move_up", self.list.move_up.as_slice()),
@@ -1318,6 +1342,10 @@ impl RuntimeKeymap {
                 ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
+                (
+                    "toggle_gemini_thinking",
+                    self.app.toggle_gemini_thinking.as_slice(),
+                ),
                 (
                     "composer.history_search_previous",
                     self.composer.history_search_previous.as_slice(),
@@ -2722,6 +2750,36 @@ mod tests {
             runtime.app.toggle_raw_output,
             vec![key_hint::plain(KeyCode::F(12))]
         );
+    }
+
+    #[test]
+    fn gemini_thinking_toggle_defaults_to_alt_t() {
+        let runtime = RuntimeKeymap::defaults();
+        assert_eq!(
+            runtime.app.toggle_gemini_thinking,
+            vec![key_hint::alt(KeyCode::Char('t'))]
+        );
+    }
+
+    #[test]
+    fn gemini_thinking_toggle_can_be_remapped() {
+        let mut keymap = TuiKeymap::default();
+        keymap.global.toggle_gemini_thinking = Some(one("f11"));
+
+        let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+
+        assert_eq!(
+            runtime.app.toggle_gemini_thinking,
+            vec![key_hint::plain(KeyCode::F(11))]
+        );
+    }
+
+    #[test]
+    fn gemini_thinking_toggle_conflicts_with_existing_main_surface_bindings() {
+        let mut keymap = TuiKeymap::default();
+        keymap.global.toggle_gemini_thinking = Some(one("ctrl-o"));
+
+        expect_conflict(&keymap, "copy", "toggle_gemini_thinking");
     }
 
     #[test]

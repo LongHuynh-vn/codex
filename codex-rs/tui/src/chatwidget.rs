@@ -529,6 +529,7 @@ pub(crate) struct ChatWidget {
     transcript: TranscriptState,
     config: Config,
     raw_output_mode: bool,
+    gemini_thinking_visible: Arc<AtomicBool>,
     /// Runtime value resolved by core. `config.service_tier` remains the explicit user choice.
     effective_service_tier: Option<String>,
     /// The unmasked collaboration mode settings (always Default mode).
@@ -803,6 +804,8 @@ fn contains_plan_keyword(text: &str) -> bool {
     text.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
         .any(|word| word.eq_ignore_ascii_case("plan"))
 }
+
+const GEMINI_REASONING_ID_PREFIX: &str = "gemini-reasoning";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ThreadItemRenderSource {
@@ -1652,6 +1655,23 @@ impl ChatWidget {
     pub(crate) fn toggle_raw_output_mode_and_notify(&mut self) -> bool {
         let enabled = !self.raw_output_mode;
         self.set_raw_output_mode_and_notify(enabled);
+        enabled
+    }
+
+    pub(crate) fn set_gemini_thinking_visible_and_notify(&mut self, enabled: bool) {
+        self.gemini_thinking_visible
+            .store(enabled, Ordering::Relaxed);
+        let message = if enabled {
+            "Gemini thinking shown."
+        } else {
+            "Gemini thinking hidden."
+        };
+        self.add_info_message(message.to_string(), /*hint*/ None);
+    }
+
+    pub(crate) fn toggle_gemini_thinking_and_notify(&mut self) -> bool {
+        let enabled = !self.gemini_thinking_visible.load(Ordering::Relaxed);
+        self.set_gemini_thinking_visible_and_notify(enabled);
         enabled
     }
 
