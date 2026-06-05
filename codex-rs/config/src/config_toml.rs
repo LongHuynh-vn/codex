@@ -336,6 +336,10 @@ pub struct ConfigToml {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: Option<bool>,
 
+    /// When set to `true`, Gemini thought summaries will be shown in the reasoning UI/output.
+    /// Defaults to `false`.
+    pub show_gemini_thought_summary: Option<bool>,
+
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub plan_mode_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,

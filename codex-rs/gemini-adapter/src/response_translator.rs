@@ -1,6 +1,7 @@
 use codex_api::ResponseEvent;
 use codex_protocol::error::Result;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use serde::Deserialize;
@@ -8,15 +9,20 @@ use serde_json::Value;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use crate::GeminiThoughtSummaryDisplay;
+
 static NEXT_RESPONSE_CALL_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct StreamAccumulator {
     text: String,
+    thought_text: String,
+    standalone_thought_signature: Option<String>,
     calls: Vec<PendingFunctionCall>,
     usage: Option<TokenUsage>,
     finished: bool,
     emitted: bool,
+    thought_summary_display: GeminiThoughtSummaryDisplay,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +59,7 @@ struct Part {
     text: Option<String>,
     function_call: Option<FunctionCall>,
     thought_signature: Option<String>,
+    thought: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +80,19 @@ struct UsageMetadata {
 }
 
 impl StreamAccumulator {
+    pub(crate) fn new(thought_summary_display: GeminiThoughtSummaryDisplay) -> Self {
+        Self {
+            text: String::new(),
+            thought_text: String::new(),
+            standalone_thought_signature: None,
+            calls: Vec::new(),
+            usage: None,
+            finished: false,
+            emitted: false,
+            thought_summary_display,
+        }
+    }
+
     pub(crate) fn process_event_data(&mut self, data: &str) -> Result<Vec<ResponseEvent>> {
         let response: GenerateContentResponse = serde_json::from_str(data)?;
         if let Some(usage) = response.usage_metadata {
@@ -91,25 +111,36 @@ impl StreamAccumulator {
 
     fn process_parts(&mut self, parts: Vec<Part>) {
         for part in parts {
-            if let Some(text) = part.text
-                && !text.is_empty()
-            {
-                self.text.push_str(&text);
-            }
+            let is_thought = part.thought.unwrap_or(false);
+            let mut thought_signature = part.thought_signature.clone();
             if let Some(function_call) = part.function_call {
                 self.calls.push(PendingFunctionCall {
                     name: function_call.name,
                     args: function_call.args,
-                    thought_signature: part.thought_signature,
+                    thought_signature: thought_signature
+                        .take()
+                        .or_else(|| self.standalone_thought_signature.take()),
                 });
-            } else if let Some(thought_signature) = part.thought_signature
-                && let Some(last_call) = self
+            } else if let Some(thought_signature) = thought_signature {
+                if let Some(last_call) = self
                     .calls
                     .iter_mut()
                     .rev()
                     .find(|call| call.thought_signature.is_none())
+                {
+                    last_call.thought_signature = Some(thought_signature);
+                } else if self.calls.is_empty() {
+                    self.standalone_thought_signature = Some(thought_signature);
+                }
+            }
+            if let Some(text) = part.text
+                && !text.is_empty()
             {
-                last_call.thought_signature = Some(thought_signature);
+                if is_thought {
+                    self.thought_text.push_str(&text);
+                } else {
+                    self.text.push_str(&text);
+                }
             }
         }
     }
@@ -125,6 +156,9 @@ impl StreamAccumulator {
         self.emitted = true;
 
         let mut events = Vec::new();
+        if let Some(reasoning_item) = self.reasoning_item() {
+            events.push(ResponseEvent::OutputItemDone(reasoning_item));
+        }
         if !self.text.is_empty() {
             events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
                 id: None,
@@ -153,6 +187,44 @@ impl StreamAccumulator {
             end_turn: Some(self.calls.is_empty()),
         });
         Ok(events)
+    }
+
+    fn reasoning_item(&self) -> Option<ResponseItem> {
+        let has_thought_text = !self.thought_text.is_empty();
+        let has_signature = self.standalone_thought_signature.is_some();
+        if !has_thought_text && !has_signature {
+            return None;
+        }
+        if matches!(
+            self.thought_summary_display,
+            GeminiThoughtSummaryDisplay::Hidden
+        ) && !has_signature
+        {
+            return None;
+        }
+
+        let summary = match self.thought_summary_display {
+            GeminiThoughtSummaryDisplay::Hidden => Vec::new(),
+            GeminiThoughtSummaryDisplay::Visible if has_thought_text => {
+                vec![ReasoningItemReasoningSummary::SummaryText {
+                    text: self.thought_text.clone(),
+                }]
+            }
+            GeminiThoughtSummaryDisplay::Visible => Vec::new(),
+        };
+
+        Some(ResponseItem::Reasoning {
+            id: "gemini-reasoning".to_string(),
+            summary,
+            content: None,
+            encrypted_content: self.standalone_thought_signature.clone(),
+        })
+    }
+}
+
+impl Default for StreamAccumulator {
+    fn default() -> Self {
+        Self::new(GeminiThoughtSummaryDisplay::Hidden)
     }
 }
 

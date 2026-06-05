@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::GeminiPrompt;
+use crate::GeminiThoughtSummaryDisplay;
 use crate::GeminiToolChoice;
 use crate::model_config::gemini_model_catalog;
 
@@ -54,6 +55,7 @@ fn builds_native_request_with_thinking_and_signature_replay() {
         })],
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let request =
@@ -131,6 +133,7 @@ fn sanitizes_known_bad_tool_schema_for_gemini() {
         })],
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let request =
@@ -201,6 +204,7 @@ fn serializes_parallel_function_calls_before_results_by_call_id() {
         tools: vec![weather_tool()],
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let request =
@@ -262,6 +266,7 @@ fn normalizes_system_instruction_without_truncating_content() {
         tools: Vec::new(),
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let request =
@@ -304,6 +309,7 @@ fn serializes_native_response_schema_without_tools() {
         tools: Vec::new(),
         output_schema: Some(schema),
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let request =
@@ -360,6 +366,7 @@ fn serializes_any_function_calling_config_for_plan_mode_fallback() {
                 "propose_plan".to_string(),
             ],
         },
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let request =
@@ -407,6 +414,7 @@ fn structured_output_never_uses_forced_any_tool_config() {
         tool_choice: GeminiToolChoice::Any {
             allowed_function_names: vec!["request_user_input".to_string()],
         },
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let request =

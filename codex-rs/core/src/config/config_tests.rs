@@ -206,6 +206,31 @@ async fn load_config_normalizes_relative_cwd_override() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn load_config_resolves_gemini_thought_summary_display() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let default_config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    assert!(!default_config.show_gemini_thought_summary);
+
+    let enabled_config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            show_gemini_thought_summary: Some(true),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    assert!(enabled_config.show_gemini_thought_summary);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_loads_global_agents_instructions() -> std::io::Result<()> {
     let codex_home = tempdir()?;
     std::fs::write(

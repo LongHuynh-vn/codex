@@ -651,6 +651,10 @@ pub struct Config {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: bool,
 
+    /// When set to `true`, Gemini thought summaries will be shown in the reasoning UI/output.
+    /// Defaults to `false`.
+    pub show_gemini_thought_summary: bool,
+
     /// User-provided instructions from AGENTS.md.
     pub user_instructions: Option<String>,
 
@@ -3535,6 +3539,7 @@ impl Config {
                 .show_raw_agent_reasoning
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
+            show_gemini_thought_summary: cfg.show_gemini_thought_summary.unwrap_or(false),
             guardian_policy_config,
             model_reasoning_effort: cfg.model_reasoning_effort,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,

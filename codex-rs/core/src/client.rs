@@ -31,6 +31,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use chrono::Local;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
 use codex_api::CompactClient as ApiCompactClient;
@@ -117,6 +118,7 @@ use codex_api::map_api_error;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
 use codex_gemini_adapter::GeminiPrompt;
+use codex_gemini_adapter::GeminiThoughtSummaryDisplay;
 use codex_login::auth_env_telemetry::AuthEnvTelemetry;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_model_provider::SharedModelProvider;
@@ -147,6 +149,8 @@ const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
 const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
+const GEMINI_CURRENT_DATE_INSTRUCTIONS_MARKER: &str = "Today's date is";
+const GEMINI_CURRENT_DATE_INSTRUCTIONS_SUFFIX: &str = "For any time-sensitive query, you MUST use this as the current date, and trust web_search/web_fetch results over your training data when they conflict on dates or latest versions.";
 const GEMINI_APPLY_PATCH_INSTRUCTIONS: &str = r#"Gemini file edits: prefer the `apply_patch` shell command over `cat >`, `python -c`, or `sed`, especially for small in-place edits. Call the visible shell tool (`exec_command` or `shell_command`) with a heredoc such as:
 
 apply_patch <<'PATCH'
@@ -189,6 +193,7 @@ struct ModelClientState {
     session_source: SessionSource,
     parent_thread_id: Option<ThreadId>,
     model_verbosity: Option<VerbosityConfig>,
+    show_gemini_thought_summary: bool,
     enable_request_compression: bool,
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
@@ -338,6 +343,7 @@ impl ModelClient {
         session_source: SessionSource,
         parent_thread_id: Option<ThreadId>,
         model_verbosity: Option<VerbosityConfig>,
+        show_gemini_thought_summary: bool,
         enable_request_compression: bool,
         include_timing_metrics: bool,
         beta_features_header: Option<String>,
@@ -362,6 +368,7 @@ impl ModelClient {
                 session_source,
                 parent_thread_id,
                 model_verbosity,
+                show_gemini_thought_summary,
                 enable_request_compression,
                 include_timing_metrics,
                 beta_features_header,
@@ -1414,6 +1421,17 @@ impl ModelClientSession {
             }
             instructions.push_str(GEMINI_SUBAGENT_COORDINATION_INSTRUCTIONS);
         }
+        if !instructions.contains(GEMINI_CURRENT_DATE_INSTRUCTIONS_MARKER) {
+            let now = Local::now();
+            let current_date = now.format("%Y-%m-%d");
+            let weekday = now.format("%A");
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(&format!(
+                "{GEMINI_CURRENT_DATE_INSTRUCTIONS_MARKER} {current_date} ({weekday}). {GEMINI_CURRENT_DATE_INSTRUCTIONS_SUFFIX}"
+            ));
+        }
         let rx = codex_gemini_adapter::stream_generate_content(
             build_reqwest_client(),
             self.client.state.provider.info(),
@@ -1424,6 +1442,11 @@ impl ModelClientSession {
                 tools,
                 output_schema: prompt.output_schema.clone(),
                 tool_choice: codex_gemini_adapter::GeminiToolChoice::Auto,
+                thought_summary_display: if self.client.state.show_gemini_thought_summary {
+                    GeminiThoughtSummaryDisplay::Visible
+                } else {
+                    GeminiThoughtSummaryDisplay::Hidden
+                },
             },
             effort,
         )

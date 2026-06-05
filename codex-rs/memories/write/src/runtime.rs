@@ -182,6 +182,7 @@ impl MemoryStartupContext {
             session_source,
             config_snapshot.parent_thread_id,
             config.model_verbosity,
+            /*show_gemini_thought_summary*/ false,
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             /*beta_features_header*/ None,

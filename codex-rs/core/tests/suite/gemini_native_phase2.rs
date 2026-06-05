@@ -16,6 +16,7 @@ use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
+use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
 use serial_test::serial;
@@ -249,6 +250,27 @@ async fn gemini_apply_patch_uses_exec_command_intercept() -> Result<()> {
     assert!(
         instructions.contains("`cat >`, `python -c`, or `sed`"),
         "Gemini systemInstruction must prefer apply_patch over shell writes: {instructions}"
+    );
+    assert!(
+        instructions.contains("Today's date is"),
+        "Gemini systemInstruction must include current-date marker: {instructions}"
+    );
+    assert_eq!(
+        instructions.matches("Today's date is").count(),
+        1,
+        "Gemini systemInstruction must include current-date marker once: {instructions}"
+    );
+    assert!(
+        Regex::new(r"Today's date is \d{4}-\d{2}-\d{2} \([A-Za-z]+\)\.")
+            .expect("date regex should compile")
+            .is_match(instructions),
+        "Gemini systemInstruction must include date-shaped current date: {instructions}"
+    );
+    assert!(
+        instructions.contains(
+            "For any time-sensitive query, you MUST use this as the current date, and trust web_search/web_fetch results over your training data when they conflict on dates or latest versions."
+        ),
+        "Gemini systemInstruction must include time-sensitive query guidance: {instructions}"
     );
 
     let follow_up_parts = captured[1]["contents"]

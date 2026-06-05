@@ -215,6 +215,7 @@ async fn mocked_gemini_per_day_quota_falls_back_to_pro() {
         tools: Vec::new(),
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
 
     let mut stream = stream_generate_content(
@@ -354,6 +355,7 @@ async fn live_gemini_accepts_sanitized_complex_schema_when_auth_is_set() {
         tools: vec![complex_schema_tool()],
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -433,6 +435,7 @@ async fn live_gemini_accepts_guardian_structured_output_when_auth_is_set() {
             "required": ["outcome"]
         })),
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -494,6 +497,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         tools: tools.clone(),
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
     let first_request = request_translator::build_generate_content_request(
         &first_prompt,
@@ -539,6 +543,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         tools,
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
     let follow_up_request = request_translator::build_generate_content_request(
         &follow_up_prompt,
@@ -706,6 +711,7 @@ async fn live_next_function_call(
         tools,
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
     let request = request_translator::build_generate_content_request(
         &prompt,
@@ -950,6 +956,7 @@ async fn next_function_call(
         tools,
         output_schema: None,
         tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
     let mut stream = stream_generate_content(
         reqwest::Client::new(),

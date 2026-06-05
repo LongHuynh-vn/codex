@@ -37,6 +37,12 @@ pub enum GeminiToolChoice {
     Any { allowed_function_names: Vec<String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeminiThoughtSummaryDisplay {
+    Hidden,
+    Visible,
+}
+
 /// Phase-1 Gemini prompt data, kept independent from codex-core's Prompt type.
 #[derive(Debug, Clone)]
 pub struct GeminiPrompt {
@@ -45,6 +51,7 @@ pub struct GeminiPrompt {
     pub tools: Vec<ToolSpec>,
     pub output_schema: Option<Value>,
     pub tool_choice: GeminiToolChoice,
+    pub thought_summary_display: GeminiThoughtSummaryDisplay,
 }
 
 pub async fn stream_generate_content(
@@ -61,7 +68,8 @@ pub async fn stream_generate_content(
 
     let (tx, rx) = mpsc::channel(1600);
     tokio::spawn(async move {
-        let mut accumulator = response_translator::StreamAccumulator::default();
+        let mut accumulator =
+            response_translator::StreamAccumulator::new(prompt.thought_summary_display);
         let mut events = response.bytes_stream().eventsource();
         while let Some(event) = events.next().await {
             let event = match event {

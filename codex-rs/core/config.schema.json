@@ -5138,6 +5138,10 @@
         "set": null
       }
     },
+    "show_gemini_thought_summary": {
+      "description": "When set to `true`, Gemini thought summaries will be shown in the reasoning UI/output. Defaults to `false`.",
+      "type": "boolean"
+    },
     "show_raw_agent_reasoning": {
       "description": "When set to `true`, `AgentReasoningRawContentEvent` events will be shown in the UI/output. Defaults to `false`.",
       "type": "boolean"

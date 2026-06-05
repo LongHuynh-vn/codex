@@ -1040,6 +1040,7 @@ impl Session {
                     session_configuration.session_source.clone(),
                     session_configuration.parent_thread_id,
                     config.model_verbosity,
+            config.show_gemini_thought_summary,
                     config.features.enabled(Feature::EnableRequestCompression),
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
