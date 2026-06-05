@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn vt100_deep_nested_mixed_list_third_level_marker_is_plain() {
+    fn vt100_deep_nested_mixed_list_third_level_marker_is_colored() {
         // Markdown with five levels (ordered → unordered → ordered → unordered → unordered).
         let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
         let text = render_markdown_text(md);
@@ -714,14 +714,13 @@ mod tests {
             });
         let col_start = rows[row_idx].find(needle).unwrap() as u16; // column where '1' starts
 
-        // Verify that the numeric marker ("1.") at the third level and the
-        // content after the following space both use the default foreground.
+        // Verify that the numeric marker ("1.") at the third level is colored
+        // and the content after the following space resets to default.
         for c in [col_start, col_start + 1] {
             let cell = screen.cell(row_idx as u16, c).unwrap();
-            assert_eq!(
-                cell.fgcolor(),
-                vt100::Color::Default,
-                "expected default-color 3rd-level marker at row {row_idx} col {c}, got {:?}",
+            assert!(
+                cell.fgcolor() != vt100::Color::Default,
+                "expected colored 3rd-level marker at row {row_idx} col {c}, got {:?}",
                 cell.fgcolor()
             );
         }

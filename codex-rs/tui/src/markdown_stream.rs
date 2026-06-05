@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_nested_mixed_lists_ordered_marker_is_plain() {
+    async fn e2e_stream_nested_mixed_lists_ordered_marker_is_cyan() {
         let md = [
             "1. First\n",
             "   - Second level\n",
@@ -311,14 +311,14 @@ mod tests {
         });
         let idx = find_idx.expect("expected third-level ordered line");
         let line = &out[idx];
-        // Ordered-list markers use the default foreground like unordered markers.
-        let has_plain_marker = line
+        // Ordered-list markers use the configured cyan foreground.
+        let has_cyan_marker = line
             .spans
             .iter()
-            .any(|s| s.content.trim().starts_with("1.") && s.style.fg.is_none());
+            .any(|s| s.content.trim().starts_with("1.") && s.style.fg == Some(Color::Cyan));
         assert!(
-            has_plain_marker,
-            "expected an ordered-list marker span with default fg on: {line:?}"
+            has_cyan_marker,
+            "expected an ordered-list marker span with cyan fg on: {line:?}"
         );
     }
 
@@ -398,7 +398,7 @@ mod tests {
             .collect();
         assert_eq!(
             s2,
-            vec!["", "## Heading"],
+            vec!["", "Heading"],
             "expected a blank separator then the heading line"
         );
 
@@ -411,7 +411,7 @@ mod tests {
         };
 
         assert_eq!(line_to_string(&out1[0]), "Hello.");
-        assert_eq!(line_to_string(&out2[1]), "## Heading");
+        assert_eq!(line_to_string(&out2[1]), "Heading");
     }
 
     #[tokio::test]
@@ -458,7 +458,7 @@ mod tests {
             .collect();
         assert_eq!(
             s2,
-            vec!["", "## Adding Bird subcommand"],
+            vec!["", "Adding Bird subcommand"],
             "expected the heading line only on the final commit"
         );
 
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_deep_nested_third_level_marker_is_plain() {
+    async fn e2e_stream_deep_nested_third_level_marker_is_cyan() {
         let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
         let streamed = super::simulate_stream_markdown_for_tests(&[md], /*finalize*/ true);
         let streamed_strs = lines_to_plain_strings(&streamed);
@@ -602,15 +602,16 @@ mod tests {
         });
 
         // The marker (including indent and "1.") is expected to be in the first span
-        // with the default color; following content should also be default color.
+        // with cyan color; following content should be default color.
         assert!(
             !line.spans.is_empty(),
             "expected non-empty spans for the third-level line"
         );
         let marker_span = &line.spans[0];
         assert_eq!(
-            marker_span.style.fg, None,
-            "expected default-color 3rd-level ordered marker, got {:?}",
+            marker_span.style.fg,
+            Some(Color::Cyan),
+            "expected cyan 3rd-level ordered marker, got {:?}",
             marker_span.style.fg
         );
         // Find the first non-empty non-space content span and verify it is default color.
@@ -642,7 +643,7 @@ mod tests {
         );
         // Expect the heading and no fence markers. A blank separator may or may not be rendered at start.
         assert!(
-            texts.iter().any(|s| s == "## Heading"),
+            texts.iter().any(|s| s == "Heading"),
             "expected heading line: {texts:?}"
         );
     }
@@ -656,7 +657,7 @@ mod tests {
             Some(i) => i,
             None => panic!("para present"),
         };
-        let head_idx = match texts.iter().position(|s| s == "## Title") {
+        let head_idx = match texts.iter().position(|s| s == "Title") {
             Some(i) => i,
             None => panic!("heading present"),
         };

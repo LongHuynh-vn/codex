@@ -103,18 +103,18 @@ struct MarkdownStyles {
 impl Default for MarkdownStyles {
     fn default() -> Self {
         Self {
-            h1: Style::new().bold().underlined(),
-            h2: Style::new().bold(),
-            h3: Style::new().bold().italic(),
-            h4: Style::new().italic(),
+            h1: Style::new().cyan().bold().underlined(),
+            h2: Style::new().light_cyan().bold(),
+            h3: Style::new().light_blue().bold(),
+            h4: Style::new().light_blue().italic(),
             h5: Style::new().italic(),
             h6: Style::new().italic(),
             code: Style::new().cyan(),
             emphasis: Style::new().italic(),
             strong: Style::new().bold(),
             strikethrough: Style::new().crossed_out(),
-            ordered_list_marker: Style::new(),
-            unordered_list_marker: Style::new(),
+            ordered_list_marker: Style::new().cyan(),
+            unordered_list_marker: Style::new().cyan(),
             link: Style::new().cyan().underlined(),
             blockquote: Style::new().green(),
         }
@@ -580,8 +580,7 @@ where
             HeadingLevel::H5 => self.styles.h5,
             HeadingLevel::H6 => self.styles.h6,
         };
-        let content = format!("{} ", "#".repeat(level as usize));
-        self.push_line(Line::from(vec![Span::styled(content, heading_style)]));
+        self.push_line(Line::default());
         self.push_inline_style(heading_style);
         self.needs_newline = false;
     }
