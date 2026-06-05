@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::WebSearchAction;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::WebSearchBeginEvent;
+use codex_protocol::protocol::WebSearchEndEvent;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
@@ -140,23 +144,25 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        let ToolPayload::Function { arguments } = invocation.payload else {
+        let ToolInvocation {
+            session,
+            turn,
+            call_id,
+            payload,
+            ..
+        } = invocation;
+        let ToolPayload::Function { arguments } = payload else {
             return Err(FunctionCallError::RespondToModel(
                 "web_search handler received unsupported payload".to_string(),
             ));
         };
         let args: WebSearchArgs = parse_arguments(&arguments)?;
-        let query = args.query.trim();
+        let query = args.query.trim().to_string();
         if query.is_empty() {
             return Err(FunctionCallError::RespondToModel(
                 "query must not be empty".to_string(),
             ));
         }
-        let Some(api_key) = self.config.tavily_api_key.as_deref() else {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "web_search is not configured; set {TAVILY_API_KEY_ENV} to use Tavily search"
-            )));
-        };
 
         let limit = args
             .limit
@@ -167,45 +173,81 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
                 "limit must be greater than zero".to_string(),
             ));
         }
-        let url = Url::parse(&self.config.tavily_search_url).map_err(|err| {
-            FunctionCallError::RespondToModel(format!(
-                "configured Tavily search URL is not valid: {err}"
-            ))
-        })?;
-        let request = TavilySearchRequest {
-            query,
-            max_results: limit,
-            search_depth: "basic",
-            topic: "general",
+
+        let action = WebSearchAction::Search {
+            query: Some(query.clone()),
+            queries: None,
         };
+        session
+            .send_event(
+                turn.as_ref(),
+                EventMsg::WebSearchBegin(WebSearchBeginEvent {
+                    call_id: call_id.clone(),
+                }),
+            )
+            .await;
 
-        let response = self
-            .client
-            .post(url.clone())
-            .bearer_auth(api_key)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("web_search request failed: {err}"))
+        let result = async {
+            let Some(api_key) = self.config.tavily_api_key.as_deref() else {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "web_search is not configured; set {TAVILY_API_KEY_ENV} to use Tavily search"
+                )));
+            };
+            let url = Url::parse(&self.config.tavily_search_url).map_err(|err| {
+                FunctionCallError::RespondToModel(format!(
+                    "configured Tavily search URL is not valid: {err}"
+                ))
             })?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let body = truncate_text(&body, DEFAULT_FETCH_MAX_BYTES);
-            return Err(FunctionCallError::RespondToModel(format!(
-                "web_search request to {url} failed with {status}: {body}"
-            )));
-        }
+            let request = TavilySearchRequest {
+                query: &query,
+                max_results: limit,
+                search_depth: "basic",
+                topic: "general",
+            };
 
-        let body: TavilySearchResponse = response.json().await.map_err(|err| {
-            FunctionCallError::RespondToModel(format!("web_search response was not JSON: {err}"))
-        })?;
-        let output = format_search_results(&body, limit);
-        Ok(boxed_tool_output(FunctionToolOutput::from_text(
-            output,
-            Some(true),
-        )))
+            let response = self
+                .client
+                .post(url.clone())
+                .bearer_auth(api_key)
+                .json(&request)
+                .send()
+                .await
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!("web_search request failed: {err}"))
+                })?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                let body = truncate_text(&body, DEFAULT_FETCH_MAX_BYTES);
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "web_search request to {url} failed with {status}: {body}"
+                )));
+            }
+
+            let body: TavilySearchResponse = response.json().await.map_err(|err| {
+                FunctionCallError::RespondToModel(format!(
+                    "web_search response was not JSON: {err}"
+                ))
+            })?;
+            let output = format_search_results(&body, limit);
+            Ok(boxed_tool_output(FunctionToolOutput::from_text(
+                output,
+                Some(true),
+            )))
+        }
+        .await;
+
+        session
+            .send_event(
+                turn.as_ref(),
+                EventMsg::WebSearchEnd(WebSearchEndEvent {
+                    call_id,
+                    query,
+                    action,
+                }),
+            )
+            .await;
+        result
     }
 }
 
@@ -248,7 +290,14 @@ impl ToolExecutor<ToolInvocation> for ClientWebFetchHandler {
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        let ToolPayload::Function { arguments } = invocation.payload else {
+        let ToolInvocation {
+            session,
+            turn,
+            call_id,
+            payload,
+            ..
+        } = invocation;
+        let ToolPayload::Function { arguments } = payload else {
             return Err(FunctionCallError::RespondToModel(
                 "web_fetch handler received unsupported payload".to_string(),
             ));
@@ -275,31 +324,59 @@ impl ToolExecutor<ToolInvocation> for ClientWebFetchHandler {
             ));
         }
 
-        let response = self.client.get(url.clone()).send().await.map_err(|err| {
-            FunctionCallError::RespondToModel(format!("web_fetch request failed: {err}"))
-        })?;
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("unknown")
-            .to_string();
-        let body = response.text().await.map_err(|err| {
-            FunctionCallError::RespondToModel(format!("web_fetch response read failed: {err}"))
-        })?;
-        let body = if content_type.to_ascii_lowercase().contains("html") {
-            html_to_text(&body)
-        } else {
-            body
+        let url_text = url.to_string();
+        let action = WebSearchAction::OpenPage {
+            url: Some(url_text.clone()),
         };
-        let body = truncate_text(&body, max_bytes);
-        let output =
-            format!("URL: {url}\nStatus: {status}\nContent-Type: {content_type}\n\n{body}");
-        Ok(boxed_tool_output(FunctionToolOutput::from_content(
-            vec![FunctionCallOutputContentItem::InputText { text: output }],
-            Some(true),
-        )))
+        session
+            .send_event(
+                turn.as_ref(),
+                EventMsg::WebSearchBegin(WebSearchBeginEvent {
+                    call_id: call_id.clone(),
+                }),
+            )
+            .await;
+
+        let result = async {
+            let response = self.client.get(url.clone()).send().await.map_err(|err| {
+                FunctionCallError::RespondToModel(format!("web_fetch request failed: {err}"))
+            })?;
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("unknown")
+                .to_string();
+            let body = response.text().await.map_err(|err| {
+                FunctionCallError::RespondToModel(format!("web_fetch response read failed: {err}"))
+            })?;
+            let body = if content_type.to_ascii_lowercase().contains("html") {
+                html_to_text(&body)
+            } else {
+                body
+            };
+            let body = truncate_text(&body, max_bytes);
+            let output =
+                format!("URL: {url}\nStatus: {status}\nContent-Type: {content_type}\n\n{body}");
+            Ok(boxed_tool_output(FunctionToolOutput::from_content(
+                vec![FunctionCallOutputContentItem::InputText { text: output }],
+                Some(true),
+            )))
+        }
+        .await;
+
+        session
+            .send_event(
+                turn.as_ref(),
+                EventMsg::WebSearchEnd(WebSearchEndEvent {
+                    call_id,
+                    query: url_text,
+                    action,
+                }),
+            )
+            .await;
+        result
     }
 }
 

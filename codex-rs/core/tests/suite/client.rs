@@ -996,6 +996,52 @@ async fn includes_base_instructions_override_in_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_request_does_not_include_gemini_research_diligence_instructions() {
+    skip_if_no_network!();
+    // Mock server
+    let server = MockServer::start().await;
+    let resp_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_auth(CodexAuth::from_api_key("Test API Key"));
+    let codex = builder
+        .build(&server)
+        .await
+        .expect("create new conversation")
+        .codex;
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let request = resp_mock.single_request();
+    let request_body = request.body_json();
+    assert!(
+        !request_body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Research diligence")
+    );
+    assert!(!request_body.to_string().contains("Research diligence"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chatgpt_auth_sends_correct_request() {
     skip_if_no_network!();
 

@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::WebSearchAction;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use pretty_assertions::assert_eq;
 use reqwest::Client;
 use serde_json::json;
@@ -16,14 +19,32 @@ use wiremock::matchers::path;
 
 use super::*;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_rx;
 use crate::tools::context::ToolCallSource;
 use crate::turn_diff_tracker::TurnDiffTracker;
 
 async fn invocation(tool_name: &str, arguments: serde_json::Value) -> ToolInvocation {
     let (session, turn) = make_session_and_context().await;
+    tool_invocation(tool_name, arguments, session.into(), turn.into())
+}
+
+async fn invocation_with_rx(
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> (ToolInvocation, async_channel::Receiver<Event>) {
+    let (session, turn, rx) = make_session_and_context_with_rx().await;
+    (tool_invocation(tool_name, arguments, session, turn), rx)
+}
+
+fn tool_invocation(
+    tool_name: &str,
+    arguments: serde_json::Value,
+    session: std::sync::Arc<crate::session::session::Session>,
+    turn: std::sync::Arc<crate::session::turn_context::TurnContext>,
+) -> ToolInvocation {
     ToolInvocation {
-        session: session.into(),
-        turn: turn.into(),
+        session,
+        turn,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
         call_id: format!("call-{tool_name}"),
@@ -33,6 +54,27 @@ async fn invocation(tool_name: &str, arguments: serde_json::Value) -> ToolInvoca
             arguments: serde_json::to_string(&arguments).expect("arguments should serialize"),
         },
     }
+}
+
+async fn assert_web_search_events(
+    rx: &async_channel::Receiver<Event>,
+    expected_call_id: &str,
+    expected_query: &str,
+    expected_action: WebSearchAction,
+) {
+    let begin = rx.recv().await.expect("web search begin event");
+    let EventMsg::WebSearchBegin(begin) = begin.msg else {
+        panic!("expected web search begin event");
+    };
+    assert_eq!(begin.call_id, expected_call_id);
+
+    let end = rx.recv().await.expect("web search end event");
+    let EventMsg::WebSearchEnd(end) = end.msg else {
+        panic!("expected web search end event");
+    };
+    assert_eq!(end.call_id, expected_call_id);
+    assert_eq!(end.query, expected_query);
+    assert_eq!(end.action, expected_action);
 }
 
 fn function_output_text(item: ResponseInputItem) -> String {
@@ -86,14 +128,13 @@ async fn web_search_executes_client_side_backend() {
     let payload = ToolPayload::Function {
         arguments: json!({"query": "weather paris", "limit": 2}).to_string(),
     };
+    let (invocation, rx) = invocation_with_rx(
+        WEB_SEARCH_TOOL_NAME,
+        json!({"query": "weather paris", "limit": 2}),
+    )
+    .await;
     let output = handler
-        .handle(
-            invocation(
-                WEB_SEARCH_TOOL_NAME,
-                json!({"query": "weather paris", "limit": 2}),
-            )
-            .await,
-        )
+        .handle(invocation)
         .await
         .expect("web search should succeed");
     let item = output.to_response_item("call-web-search", &payload);
@@ -111,6 +152,16 @@ async fn web_search_executes_client_side_backend() {
             },
         }
     );
+    assert_web_search_events(
+        &rx,
+        "call-web_search",
+        "weather paris",
+        WebSearchAction::Search {
+            query: Some("weather paris".to_string()),
+            queries: None,
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -136,6 +187,46 @@ async fn web_search_requires_tavily_api_key() {
 }
 
 #[tokio::test]
+async fn web_search_emits_end_when_tavily_returns_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let handler = ClientWebSearchHandler::new(
+        Client::new(),
+        ClientWebConfig {
+            tavily_api_key: Some("test-key".to_string()),
+            tavily_search_url: format!("{}/search", server.uri()),
+        },
+    );
+    let (invocation, rx) =
+        invocation_with_rx(WEB_SEARCH_TOOL_NAME, json!({"query": "weather paris"})).await;
+    let result = handler.handle(invocation).await;
+
+    let Err(FunctionCallError::RespondToModel(message)) = result else {
+        panic!("expected Tavily error");
+    };
+    assert!(
+        message.contains("failed with 500 Internal Server Error"),
+        "unexpected error message: {message}"
+    );
+    assert_web_search_events(
+        &rx,
+        "call-web_search",
+        "weather paris",
+        WebSearchAction::Search {
+            query: Some("weather paris".to_string()),
+            queries: None,
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn web_fetch_executes_client_side_http_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -150,10 +241,15 @@ async fn web_fetch_executes_client_side_http_get() {
     let url = format!("{}/page", server.uri());
     let handler = ClientWebFetchHandler::new(Client::new());
     let payload = ToolPayload::Function {
-        arguments: json!({"url": url, "max_bytes": 2000}).to_string(),
+        arguments: json!({"url": url.clone(), "max_bytes": 2000}).to_string(),
     };
+    let (invocation, rx) = invocation_with_rx(
+        WEB_FETCH_TOOL_NAME,
+        json!({"url": url.clone(), "max_bytes": 2000}),
+    )
+    .await;
     let output = handler
-        .handle(invocation(WEB_FETCH_TOOL_NAME, json!({"url": url, "max_bytes": 2000})).await)
+        .handle(invocation)
         .await
         .expect("web fetch should succeed");
     let text = function_output_text(output.to_response_item("call-web-fetch", &payload));
@@ -164,4 +260,56 @@ async fn web_fetch_executes_client_side_http_get() {
         ),
         "unexpected web_fetch output: {text}"
     );
+    assert_web_search_events(
+        &rx,
+        "call-web_fetch",
+        &url,
+        WebSearchAction::OpenPage {
+            url: Some(url.clone()),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn web_fetch_emits_end_when_request_fails() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("test listener should have local address");
+    let accept_task = tokio::spawn(async move {
+        let (socket, _) = listener
+            .accept()
+            .await
+            .expect("test listener should accept one connection");
+        drop(socket);
+    });
+
+    let url = format!("http://{addr}/page");
+    let handler = ClientWebFetchHandler::new(Client::new());
+    let (invocation, rx) =
+        invocation_with_rx(WEB_FETCH_TOOL_NAME, json!({"url": url.clone()})).await;
+    let result = handler.handle(invocation).await;
+    accept_task
+        .await
+        .expect("test listener task should complete");
+
+    let Err(FunctionCallError::RespondToModel(message)) = result else {
+        panic!("expected web_fetch request error");
+    };
+    assert!(
+        message.starts_with("web_fetch request failed:"),
+        "unexpected error message: {message}"
+    );
+    assert_web_search_events(
+        &rx,
+        "call-web_fetch",
+        &url,
+        WebSearchAction::OpenPage {
+            url: Some(url.clone()),
+        },
+    )
+    .await;
 }

@@ -2,11 +2,21 @@
 
 use super::*;
 
-fn web_search_header(completed: bool) -> &'static str {
-    if completed {
+fn web_search_header(completed: bool, action: Option<&WebSearchAction>) -> &'static str {
+    if completed && matches!(action, Some(WebSearchAction::OpenPage { .. })) {
+        "Fetched"
+    } else if completed {
         "Searched the web"
     } else {
         "Searching the web"
+    }
+}
+
+fn web_search_separator(completed: bool, action: Option<&WebSearchAction>) -> &'static str {
+    if completed && !matches!(action, Some(WebSearchAction::OpenPage { .. })) {
+        " for "
+    } else {
+        " "
     }
 }
 
@@ -99,24 +109,26 @@ impl HistoryCell for WebSearchCell {
             )
             .unwrap_or_else(|| "•".dim())
         };
-        let header = web_search_header(self.completed);
-        let detail = web_search_detail(self.action.as_ref(), &self.query);
+        let action = self.action.as_ref();
+        let header = web_search_header(self.completed, action);
+        let detail = web_search_detail(action, &self.query);
         let text: Text<'static> = if detail.is_empty() {
             Line::from(vec![header.bold()]).into()
         } else {
-            let separator = if self.completed { " for " } else { " " };
+            let separator = web_search_separator(self.completed, action);
             Line::from(vec![header.bold(), separator.into(), detail.into()]).into()
         };
         PrefixedWrappedHistoryCell::new(text, vec![bullet, " ".into()], "  ").display_lines(width)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
-        let header = web_search_header(self.completed);
-        let detail = web_search_detail(self.action.as_ref(), &self.query);
+        let action = self.action.as_ref();
+        let header = web_search_header(self.completed, action);
+        let detail = web_search_detail(action, &self.query);
         if detail.is_empty() {
             vec![Line::from(header)]
         } else {
-            let separator = if self.completed { " for " } else { " " };
+            let separator = web_search_separator(self.completed, action);
             vec![Line::from(format!("{header}{separator}{detail}"))]
         }
     }

@@ -151,6 +151,8 @@ const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 const GEMINI_CURRENT_DATE_INSTRUCTIONS_MARKER: &str = "Today's date is";
 const GEMINI_CURRENT_DATE_INSTRUCTIONS_SUFFIX: &str = "For any time-sensitive query, you MUST use this as the current date, and trust web_search/web_fetch results over your training data when they conflict on dates or latest versions.";
+const GEMINI_RESEARCH_DILIGENCE_INSTRUCTIONS_MARKER: &str = "Research diligence";
+const GEMINI_RESEARCH_DILIGENCE_INSTRUCTIONS: &str = "Research diligence: for factual questions about current state, versions, benchmarks, specific numbers, or who holds a role, use web_search before relying on memory. Ground every specific figure in retrieved results and cross-check with a second source or web_fetch of the primary page. If results conflict or are thin, search again rather than guessing.";
 const GEMINI_APPLY_PATCH_INSTRUCTIONS: &str = r#"Gemini file edits: prefer the `apply_patch` shell command over `cat >`, `python -c`, or `sed`, especially for small in-place edits. Call the visible shell tool (`exec_command` or `shell_command`) with a heredoc such as:
 
 apply_patch <<'PATCH'
@@ -1431,6 +1433,19 @@ impl ModelClientSession {
             instructions.push_str(&format!(
                 "{GEMINI_CURRENT_DATE_INSTRUCTIONS_MARKER} {current_date} ({weekday}). {GEMINI_CURRENT_DATE_INSTRUCTIONS_SUFFIX}"
             ));
+        }
+        if tools.iter().any(|tool| {
+            matches!(
+                tool,
+                codex_tools::ToolSpec::Function(function)
+                    if function.name == "web_search" || function.name == "web_fetch"
+            )
+        }) && !instructions.contains(GEMINI_RESEARCH_DILIGENCE_INSTRUCTIONS_MARKER)
+        {
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(GEMINI_RESEARCH_DILIGENCE_INSTRUCTIONS);
         }
         let rx = codex_gemini_adapter::stream_generate_content(
             build_reqwest_client(),

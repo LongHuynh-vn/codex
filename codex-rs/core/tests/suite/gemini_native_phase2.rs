@@ -10,6 +10,7 @@ use codex_gemini_adapter::GEMINI_3_5_FLASH_MODEL;
 use codex_gemini_adapter::model_config::gemini_model_catalog;
 use codex_model_provider_info::GEMINI_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::models::PermissionProfile;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodexBuilder;
@@ -348,6 +349,23 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
         tool_names.contains(&"web_fetch"),
         "Gemini request must expose client-side web_fetch: {tool_names:?}"
     );
+    let instructions = captured[0]["systemInstruction"]["parts"][0]["text"]
+        .as_str()
+        .expect("Gemini request systemInstruction text");
+    assert!(
+        instructions.contains("Research diligence"),
+        "Gemini systemInstruction must include research diligence marker: {instructions}"
+    );
+    assert_eq!(
+        instructions.matches("Research diligence").count(),
+        1,
+        "Gemini systemInstruction must include research diligence marker once: {instructions}"
+    );
+    assert!(
+        instructions.contains("Ground every specific figure in retrieved results")
+            && instructions.contains("cross-check with a second source or web_fetch"),
+        "Gemini systemInstruction must include research grounding guidance: {instructions}"
+    );
 
     let function_responses = captured[1]["contents"]
         .as_array()
@@ -366,6 +384,53 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
             .as_str()
             .is_some_and(|output| output.contains("Fetched Gemini Page")),
         "web_fetch functionResponse must include mocked fetched page: {function_responses:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_research_diligence_absent_when_web_tools_disabled() -> Result<()> {
+    let harness = TestCodexHarness::with_builder(gemini_builder().with_config(|config| {
+        config
+            .web_search_mode
+            .set(WebSearchMode::Disabled)
+            .expect("test web_search_mode should satisfy constraints");
+    }))
+    .await?;
+
+    let requests = mount_gemini_sse_sequence(harness.server(), vec![gemini_text_sse("done")]).await;
+
+    harness
+        .test()
+        .submit_turn_with_permission_profile(
+            "answer without Gemini client-side web tools",
+            PermissionProfile::Disabled,
+        )
+        .await?;
+
+    let captured = requests.requests();
+    assert_eq!(captured.len(), 1);
+    let tool_names = captured[0]["tools"][0]["functionDeclarations"]
+        .as_array()
+        .expect("function declarations")
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        !tool_names.contains(&"web_search"),
+        "Gemini request must not expose client-side web_search when disabled: {tool_names:?}"
+    );
+    assert!(
+        !tool_names.contains(&"web_fetch"),
+        "Gemini request must not expose client-side web_fetch when disabled: {tool_names:?}"
+    );
+    let instructions = captured[0]["systemInstruction"]["parts"][0]["text"]
+        .as_str()
+        .expect("Gemini request systemInstruction text");
+    assert!(
+        !instructions.contains("Research diligence"),
+        "Gemini systemInstruction must not include research diligence marker without web tools: {instructions}"
     );
 
     Ok(())
