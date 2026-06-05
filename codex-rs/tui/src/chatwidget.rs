@@ -1658,20 +1658,14 @@ impl ChatWidget {
         enabled
     }
 
-    pub(crate) fn set_gemini_thinking_visible_and_notify(&mut self, enabled: bool) {
+    pub(crate) fn set_gemini_thinking_visible(&mut self, enabled: bool) {
         self.gemini_thinking_visible
             .store(enabled, Ordering::Relaxed);
-        let message = if enabled {
-            "Gemini thinking shown."
-        } else {
-            "Gemini thinking hidden."
-        };
-        self.add_info_message(message.to_string(), /*hint*/ None);
     }
 
-    pub(crate) fn toggle_gemini_thinking_and_notify(&mut self) -> bool {
+    pub(crate) fn toggle_gemini_thinking(&mut self) -> bool {
         let enabled = !self.gemini_thinking_visible.load(Ordering::Relaxed);
-        self.set_gemini_thinking_visible_and_notify(enabled);
+        self.set_gemini_thinking_visible(enabled);
         enabled
     }
 

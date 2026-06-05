@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_nested_mixed_lists_ordered_marker_is_light_blue() {
+    async fn e2e_stream_nested_mixed_lists_ordered_marker_is_plain() {
         let md = [
             "1. First\n",
             "   - Second level\n",
@@ -311,14 +311,14 @@ mod tests {
         });
         let idx = find_idx.expect("expected third-level ordered line");
         let line = &out[idx];
-        // Expect at least one span on this line to be styled light blue
-        let has_light_blue = line
+        // Ordered-list markers use the default foreground like unordered markers.
+        let has_plain_marker = line
             .spans
             .iter()
-            .any(|s| s.style.fg == Some(ratatui::style::Color::LightBlue));
+            .any(|s| s.content.trim().starts_with("1.") && s.style.fg.is_none());
         assert!(
-            has_light_blue,
-            "expected an ordered-list marker span with light blue fg on: {line:?}"
+            has_plain_marker,
+            "expected an ordered-list marker span with default fg on: {line:?}"
         );
     }
 
@@ -582,7 +582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_deep_nested_third_level_marker_is_light_blue() {
+    async fn e2e_stream_deep_nested_third_level_marker_is_plain() {
         let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
         let streamed = super::simulate_stream_markdown_for_tests(&[md], /*finalize*/ true);
         let streamed_strs = lines_to_plain_strings(&streamed);
@@ -602,16 +602,15 @@ mod tests {
         });
 
         // The marker (including indent and "1.") is expected to be in the first span
-        // and colored LightBlue; following content should be default color.
+        // with the default color; following content should also be default color.
         assert!(
             !line.spans.is_empty(),
             "expected non-empty spans for the third-level line"
         );
         let marker_span = &line.spans[0];
         assert_eq!(
-            marker_span.style.fg,
-            Some(Color::LightBlue),
-            "expected LightBlue 3rd-level ordered marker, got {:?}",
+            marker_span.style.fg, None,
+            "expected default-color 3rd-level ordered marker, got {:?}",
             marker_span.style.fg
         );
         // Find the first non-empty non-space content span and verify it is default color.

@@ -113,7 +113,7 @@ impl Default for MarkdownStyles {
             emphasis: Style::new().italic(),
             strong: Style::new().bold(),
             strikethrough: Style::new().crossed_out(),
-            ordered_list_marker: Style::new().light_blue(),
+            ordered_list_marker: Style::new(),
             unordered_list_marker: Style::new(),
             link: Style::new().cyan().underlined(),
             blockquote: Style::new().green(),

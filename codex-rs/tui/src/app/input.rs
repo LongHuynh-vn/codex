@@ -169,7 +169,7 @@ impl App {
         if app_keymap_shortcuts_available
             && self.keymap.app.toggle_gemini_thinking.is_pressed(key_event)
         {
-            self.chat_widget.toggle_gemini_thinking_and_notify();
+            self.chat_widget.toggle_gemini_thinking();
             if let Err(err) = self.reflow_transcript_now(tui) {
                 tracing::warn!(error = %err, "failed to reflow transcript after Gemini thinking toggle");
                 self.chat_widget

@@ -986,13 +986,11 @@ async fn live_gemini_reasoning_item_is_retained_and_hidden_by_default() {
     assert!(cell.display_lines(/*width*/ 80).is_empty());
     assert!(cell.transcript_lines(/*width*/ 80).is_empty());
 
-    chat.set_gemini_thinking_visible_and_notify(/*enabled*/ true);
-    let _ = drain_insert_history(&mut rx);
+    chat.set_gemini_thinking_visible(/*enabled*/ true);
     let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
     assert!(rendered.contains("Gemini private thinking"));
 
-    chat.set_gemini_thinking_visible_and_notify(/*enabled*/ false);
-    let _ = drain_insert_history(&mut rx);
+    chat.set_gemini_thinking_visible(/*enabled*/ false);
     assert!(cell.display_lines(/*width*/ 80).is_empty());
 }
 
@@ -1017,8 +1015,7 @@ async fn replayed_gemini_reasoning_item_uses_gemini_visibility_toggle() {
     };
     assert!(cell.transcript_lines(/*width*/ 80).is_empty());
 
-    chat.set_gemini_thinking_visible_and_notify(/*enabled*/ true);
-    let _ = drain_insert_history(&mut rx);
+    chat.set_gemini_thinking_visible(/*enabled*/ true);
     let rendered = lines_to_single_string(&cell.transcript_lines(/*width*/ 80));
     assert!(rendered.contains("Gemini replayed thinking"));
 }
