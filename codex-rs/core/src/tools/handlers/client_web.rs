@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
+use codex_protocol::items::TurnItem;
+use codex_protocol::items::WebSearchItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::WebSearchAction;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::WebSearchBeginEvent;
-use codex_protocol::protocol::WebSearchEndEvent;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
@@ -174,18 +173,15 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
             ));
         }
 
-        let action = WebSearchAction::Search {
-            query: Some(query.clone()),
-            queries: None,
-        };
-        session
-            .send_event(
-                turn.as_ref(),
-                EventMsg::WebSearchBegin(WebSearchBeginEvent {
-                    call_id: call_id.clone(),
-                }),
-            )
-            .await;
+        let item = TurnItem::WebSearch(WebSearchItem {
+            id: call_id,
+            query: query.clone(),
+            action: WebSearchAction::Search {
+                query: Some(query.clone()),
+                queries: None,
+            },
+        });
+        session.emit_turn_item_started(turn.as_ref(), &item).await;
 
         let result = async {
             let Some(api_key) = self.config.tavily_api_key.as_deref() else {
@@ -237,16 +233,7 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
         }
         .await;
 
-        session
-            .send_event(
-                turn.as_ref(),
-                EventMsg::WebSearchEnd(WebSearchEndEvent {
-                    call_id,
-                    query,
-                    action,
-                }),
-            )
-            .await;
+        session.emit_turn_item_completed(turn.as_ref(), item).await;
         result
     }
 }
@@ -325,17 +312,14 @@ impl ToolExecutor<ToolInvocation> for ClientWebFetchHandler {
         }
 
         let url_text = url.to_string();
-        let action = WebSearchAction::OpenPage {
-            url: Some(url_text.clone()),
-        };
-        session
-            .send_event(
-                turn.as_ref(),
-                EventMsg::WebSearchBegin(WebSearchBeginEvent {
-                    call_id: call_id.clone(),
-                }),
-            )
-            .await;
+        let item = TurnItem::WebSearch(WebSearchItem {
+            id: call_id,
+            query: url_text.clone(),
+            action: WebSearchAction::OpenPage {
+                url: Some(url_text),
+            },
+        });
+        session.emit_turn_item_started(turn.as_ref(), &item).await;
 
         let result = async {
             let response = self.client.get(url.clone()).send().await.map_err(|err| {
@@ -366,16 +350,7 @@ impl ToolExecutor<ToolInvocation> for ClientWebFetchHandler {
         }
         .await;
 
-        session
-            .send_event(
-                turn.as_ref(),
-                EventMsg::WebSearchEnd(WebSearchEndEvent {
-                    call_id,
-                    query: url_text,
-                    action,
-                }),
-            )
-            .await;
+        session.emit_turn_item_completed(turn.as_ref(), item).await;
         result
     }
 }

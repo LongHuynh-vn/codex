@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use codex_protocol::items::TurnItem;
+use codex_protocol::items::WebSearchItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::WebSearchAction;
@@ -18,15 +20,9 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 
 use super::*;
-use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::tools::context::ToolCallSource;
 use crate::turn_diff_tracker::TurnDiffTracker;
-
-async fn invocation(tool_name: &str, arguments: serde_json::Value) -> ToolInvocation {
-    let (session, turn) = make_session_and_context().await;
-    tool_invocation(tool_name, arguments, session.into(), turn.into())
-}
 
 async fn invocation_with_rx(
     tool_name: &str,
@@ -56,25 +52,57 @@ fn tool_invocation(
     }
 }
 
-async fn assert_web_search_events(
+async fn assert_web_search_item_events(
     rx: &async_channel::Receiver<Event>,
     expected_call_id: &str,
     expected_query: &str,
     expected_action: WebSearchAction,
 ) {
-    let begin = rx.recv().await.expect("web search begin event");
-    let EventMsg::WebSearchBegin(begin) = begin.msg else {
-        panic!("expected web search begin event");
-    };
-    assert_eq!(begin.call_id, expected_call_id);
+    let mut messages = Vec::new();
+    loop {
+        let event = rx.recv().await.expect("web search item event");
+        let is_completed = matches!(
+            &event.msg,
+            EventMsg::ItemCompleted(completed)
+                if matches!(&completed.item, TurnItem::WebSearch(_))
+        );
+        messages.push(event.msg);
+        if is_completed {
+            break;
+        }
+    }
+    while let Ok(event) = rx.try_recv() {
+        messages.push(event.msg);
+    }
 
-    let end = rx.recv().await.expect("web search end event");
-    let EventMsg::WebSearchEnd(end) = end.msg else {
-        panic!("expected web search end event");
+    let expected_item = WebSearchItem {
+        id: expected_call_id.to_string(),
+        query: expected_query.to_string(),
+        action: expected_action,
     };
-    assert_eq!(end.call_id, expected_call_id);
-    assert_eq!(end.query, expected_query);
-    assert_eq!(end.action, expected_action);
+    let started_items = messages
+        .iter()
+        .filter_map(|message| match message {
+            EventMsg::ItemStarted(started) => match &started.item {
+                TurnItem::WebSearch(item) => Some(item),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let completed_items = messages
+        .iter()
+        .filter_map(|message| match message {
+            EventMsg::ItemCompleted(completed) => match &completed.item {
+                TurnItem::WebSearch(item) => Some(item),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(started_items, vec![&expected_item]);
+    assert_eq!(completed_items, vec![&expected_item]);
 }
 
 fn function_output_text(item: ResponseInputItem) -> String {
@@ -152,7 +180,7 @@ async fn web_search_executes_client_side_backend() {
             },
         }
     );
-    assert_web_search_events(
+    assert_web_search_item_events(
         &rx,
         "call-web_search",
         "weather paris",
@@ -173,9 +201,9 @@ async fn web_search_requires_tavily_api_key() {
             tavily_search_url: "http://127.0.0.1/search".to_string(),
         },
     );
-    let result = handler
-        .handle(invocation(WEB_SEARCH_TOOL_NAME, json!({"query": "weather paris"})).await)
-        .await;
+    let (invocation, rx) =
+        invocation_with_rx(WEB_SEARCH_TOOL_NAME, json!({"query": "weather paris"})).await;
+    let result = handler.handle(invocation).await;
 
     let Err(FunctionCallError::RespondToModel(message)) = result else {
         panic!("expected missing Tavily key error");
@@ -184,10 +212,20 @@ async fn web_search_requires_tavily_api_key() {
         message,
         "web_search is not configured; set TAVILY_API_KEY to use Tavily search"
     );
+    assert_web_search_item_events(
+        &rx,
+        "call-web_search",
+        "weather paris",
+        WebSearchAction::Search {
+            query: Some("weather paris".to_string()),
+            queries: None,
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn web_search_emits_end_when_tavily_returns_error() {
+async fn web_search_emits_item_completed_when_tavily_returns_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/search"))
@@ -214,7 +252,7 @@ async fn web_search_emits_end_when_tavily_returns_error() {
         message.contains("failed with 500 Internal Server Error"),
         "unexpected error message: {message}"
     );
-    assert_web_search_events(
+    assert_web_search_item_events(
         &rx,
         "call-web_search",
         "weather paris",
@@ -260,7 +298,7 @@ async fn web_fetch_executes_client_side_http_get() {
         ),
         "unexpected web_fetch output: {text}"
     );
-    assert_web_search_events(
+    assert_web_search_item_events(
         &rx,
         "call-web_fetch",
         &url,
@@ -272,7 +310,7 @@ async fn web_fetch_executes_client_side_http_get() {
 }
 
 #[tokio::test]
-async fn web_fetch_emits_end_when_request_fails() {
+async fn web_fetch_emits_item_completed_when_request_fails() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener should bind");
@@ -303,7 +341,7 @@ async fn web_fetch_emits_end_when_request_fails() {
         message.starts_with("web_fetch request failed:"),
         "unexpected error message: {message}"
     );
-    assert_web_search_events(
+    assert_web_search_item_events(
         &rx,
         "call-web_fetch",
         &url,

@@ -517,7 +517,7 @@ fn unified_exec_interaction_cell_renders_wait() {
 }
 
 #[test]
-fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics() {
+fn final_message_separator_includes_short_worked_label_and_runtime_metrics() {
     let summary = RuntimeMetricsSummary {
         tool_calls: RuntimeMetricTotals {
             count: 3,
@@ -552,7 +552,7 @@ fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics
     let rendered = render_lines(&cell.display_lines(/*width*/ 600));
 
     assert_eq!(rendered.len(), 1);
-    assert!(!rendered[0].contains("Worked for"));
+    assert!(rendered[0].contains("Worked for 12s"));
     assert!(rendered[0].contains("Local tools: 3 calls (2.5s)"));
     assert!(rendered[0].contains("Inference: 2 calls (1.2s)"));
     assert!(rendered[0].contains("WebSocket: 1 events send (700ms)"));
@@ -565,12 +565,22 @@ fn final_message_separator_hides_short_worked_label_and_includes_runtime_metrics
 }
 
 #[test]
-fn final_message_separator_includes_worked_label_after_one_minute() {
-    let cell = FinalMessageSeparator::new(Some(61), /*runtime_metrics*/ None);
+fn final_message_separator_includes_worked_label_after_one_second() {
+    let cell = FinalMessageSeparator::new(Some(1), /*runtime_metrics*/ None);
     let rendered = render_lines(&cell.display_lines(/*width*/ 200));
 
     assert_eq!(rendered.len(), 1);
-    assert!(rendered[0].contains("Worked for"));
+    assert!(rendered[0].contains("Worked for 1s"));
+}
+
+#[test]
+fn final_message_separator_raw_lines_include_worked_label_for_positive_elapsed_time() {
+    let positive = FinalMessageSeparator::new(Some(1), /*runtime_metrics*/ None);
+    let positive = render_lines(&positive.raw_lines());
+    assert_eq!(positive, vec!["Worked for 1s"]);
+
+    let zero = FinalMessageSeparator::new(Some(0), /*runtime_metrics*/ None);
+    assert!(zero.raw_lines().is_empty());
 }
 
 #[test]
