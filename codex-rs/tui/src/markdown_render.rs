@@ -62,8 +62,8 @@ use pulldown_cmark::Options;
 use pulldown_cmark::Parser;
 use pulldown_cmark::Tag;
 use pulldown_cmark::TagEnd;
-use ratatui::style::Style;
 use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -104,18 +104,21 @@ struct MarkdownStyles {
 impl Default for MarkdownStyles {
     fn default() -> Self {
         Self {
-            h1: Style::new().fg(Color::Rgb(235, 203, 139)).bold().underlined(), // vàng gold ấm
-            h2: Style::new().fg(Color::Rgb(158, 206, 154)).bold(),              // xanh lá nhạt
-            h3: Style::new().fg(Color::Rgb(232, 178, 120)).bold(),              // cam nhạt
-            h4: Style::new().fg(Color::Rgb(143, 200, 214)).italic(),            // xanh cyan nhạt
+            h1: Style::new()
+                .fg(Color::Rgb(235, 203, 139))
+                .bold()
+                .underlined(), // vàng gold ấm
+            h2: Style::new().fg(Color::Rgb(158, 206, 154)).bold(), // xanh lá nhạt
+            h3: Style::new().fg(Color::Rgb(232, 178, 120)).bold(), // cam nhạt
+            h4: Style::new().fg(Color::Rgb(143, 200, 214)).italic(), // xanh cyan nhạt
             h5: Style::new().fg(Color::Rgb(143, 200, 214)).italic(),
             h6: Style::new().italic(),
             code: Style::new().cyan(),
             emphasis: Style::new().italic(),
             strong: Style::new().bold(),
             strikethrough: Style::new().crossed_out(),
-            ordered_list_marker: Style::new().fg(Color::Rgb(235, 203, 139)),    // vàng gold
-            unordered_list_marker: Style::new().fg(Color::Rgb(143, 200, 214)),  // cyan nhạt
+            ordered_list_marker: Style::new().fg(Color::Rgb(235, 203, 139)), // vàng gold
+            unordered_list_marker: Style::new().fg(Color::Rgb(143, 200, 214)), // cyan nhạt
             link: Style::new().cyan().underlined(),
             blockquote: Style::new().green(),
         }

@@ -4,8 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use crate::diff_render::calculate_add_remove_from_diff;
-
 use super::*;
 
 const DIFF_COLLAPSE_THRESHOLD: usize = 20;
@@ -20,11 +18,11 @@ pub(crate) struct PatchHistoryCell {
 impl HistoryCell for PatchHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = create_diff_summary(&self.changes, &self.cwd, width as usize);
-        if self.should_collapse() && lines.len() > 1 {
-            let hidden_body_lines = lines.len() - 1;
+        let body = lines.len().saturating_sub(1);
+        if !self.diff_expanded.load(Ordering::Relaxed) && body > DIFF_COLLAPSE_THRESHOLD {
             lines.truncate(1);
             lines.push(
-                format!("  └ … {hidden_body_lines} more lines — Option+X to expand")
+                format!("  └ … {body} more lines — Option+X to expand")
                     .dim()
                     .into(),
             );
@@ -43,26 +41,6 @@ impl HistoryCell for PatchHistoryCell {
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
         create_diff_summary(&self.changes, &self.cwd, width as usize)
     }
-}
-
-impl PatchHistoryCell {
-    fn should_collapse(&self) -> bool {
-        !self.diff_expanded.load(Ordering::Relaxed)
-            && changed_line_count(&self.changes) > DIFF_COLLAPSE_THRESHOLD
-    }
-}
-
-fn changed_line_count(changes: &HashMap<PathBuf, FileChange>) -> usize {
-    changes
-        .values()
-        .map(|change| match change {
-            FileChange::Add { content } | FileChange::Delete { content } => content.lines().count(),
-            FileChange::Update { unified_diff, .. } => {
-                let (added, removed) = calculate_add_remove_from_diff(unified_diff);
-                added + removed
-            }
-        })
-        .sum()
 }
 /// Create a new `PendingPatch` cell that lists the file‑level summary of
 /// a proposed patch. The summary lines should already be formatted (e.g.

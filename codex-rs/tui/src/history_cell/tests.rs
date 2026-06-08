@@ -206,6 +206,34 @@ fn large_edit_patch_cell_collapses_by_default() {
 }
 
 #[test]
+fn context_heavy_patch_cell_collapses_by_rendered_line_count() {
+    let context = (1..=21)
+        .map(|line| format!(" unchanged {line}\n"))
+        .collect::<String>();
+    let unified_diff =
+        format!("--- a/context.txt\n+++ b/context.txt\n@@ -1,21 +1,22 @@\n{context}+new line\n");
+    let mut changes = HashMap::new();
+    changes.insert(
+        PathBuf::from("context.txt"),
+        FileChange::Update {
+            unified_diff,
+            move_path: None,
+        },
+    );
+    let cell = new_patch_event(changes, &test_cwd(), Arc::new(AtomicBool::new(/*v*/ false)));
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 120));
+
+    assert_eq!(
+        rendered,
+        vec![
+            "• Edited context.txt (+1 -0)",
+            "  └ … 22 more lines — Option+X to expand",
+        ]
+    );
+}
+
+#[test]
 fn patch_cell_expands_when_diff_toggle_is_enabled() {
     let diff_expanded = Arc::new(AtomicBool::new(/*v*/ false));
     let mut changes = HashMap::new();
