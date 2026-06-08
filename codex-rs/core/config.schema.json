@@ -2832,6 +2832,7 @@
               "open_transcript": null,
               "queue": null,
               "submit": null,
+              "toggle_diff_expanded": null,
               "toggle_fast_mode": null,
               "toggle_gemini_thinking": null,
               "toggle_raw_output": null,
@@ -3381,6 +3382,14 @@
           ],
           "description": "Submit the current composer draft."
         },
+        "toggle_diff_expanded": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Toggle large diff expansion in the transcript."
+        },
         "toggle_fast_mode": {
           "allOf": [
             {
@@ -3511,6 +3520,7 @@
             "open_transcript": null,
             "queue": null,
             "submit": null,
+            "toggle_diff_expanded": null,
             "toggle_fast_mode": null,
             "toggle_gemini_thinking": null,
             "toggle_raw_output": null,

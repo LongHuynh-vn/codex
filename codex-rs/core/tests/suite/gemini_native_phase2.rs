@@ -253,6 +253,22 @@ async fn gemini_apply_patch_uses_exec_command_intercept() -> Result<()> {
         "Gemini systemInstruction must prefer apply_patch over shell writes: {instructions}"
     );
     assert!(
+        instructions.contains("After creating or editing files"),
+        "Gemini systemInstruction must include output conciseness marker: {instructions}"
+    );
+    assert_eq!(
+        instructions
+            .matches("After creating or editing files")
+            .count(),
+        1,
+        "Gemini systemInstruction must include output conciseness marker once: {instructions}"
+    );
+    assert!(
+        instructions.contains("do not reproduce the full file contents")
+            && instructions.contains("unless the user explicitly asks"),
+        "Gemini systemInstruction must include output conciseness guidance: {instructions}"
+    );
+    assert!(
         instructions.contains("Today's date is"),
         "Gemini systemInstruction must include current-date marker: {instructions}"
     );

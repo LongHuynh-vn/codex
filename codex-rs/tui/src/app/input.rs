@@ -179,6 +179,19 @@ impl App {
             return;
         }
 
+        if app_keymap_shortcuts_available
+            && self.keymap.app.toggle_diff_expanded.is_pressed(key_event)
+        {
+            self.chat_widget.toggle_diff_expanded();
+            if let Err(err) = self.reflow_transcript_now(tui) {
+                tracing::warn!(error = %err, "failed to reflow transcript after diff expansion toggle");
+                self.chat_widget
+                    .add_error_message(format!("Failed to redraw transcript: {err}"));
+            }
+            tui.frame_requester().schedule_frame();
+            return;
+        }
+
         if app_keymap_shortcuts_available && self.keymap.app.open_transcript.is_pressed(key_event) {
             // Enter alternate screen and set viewport to full size.
             let _ = tui.enter_alt_screen();

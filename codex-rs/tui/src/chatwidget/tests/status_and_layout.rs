@@ -14,6 +14,19 @@ fn enable_test_ambient_pet(chat: &mut ChatWidget) {
     chat.install_test_ambient_pet_for_tests(/*animations_enabled*/ false);
 }
 
+#[tokio::test]
+async fn diff_expanded_toggle_updates_shared_state() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let diff_expanded = chat.diff_expanded_state();
+
+    assert!(!diff_expanded.load(Ordering::Relaxed));
+    assert!(chat.toggle_diff_expanded());
+    assert!(diff_expanded.load(Ordering::Relaxed));
+
+    chat.set_diff_expanded(/*enabled*/ false);
+    assert!(!diff_expanded.load(Ordering::Relaxed));
+}
+
 /// Receiving a token usage update without usage clears the context indicator.
 #[tokio::test]
 async fn token_count_none_resets_context_indicator() {

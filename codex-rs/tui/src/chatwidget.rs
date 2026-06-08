@@ -530,6 +530,7 @@ pub(crate) struct ChatWidget {
     config: Config,
     raw_output_mode: bool,
     gemini_thinking_visible: Arc<AtomicBool>,
+    diff_expanded: Arc<AtomicBool>,
     /// Runtime value resolved by core. `config.service_tier` remains the explicit user choice.
     effective_service_tier: Option<String>,
     /// The unmasked collaboration mode settings (always Default mode).
@@ -1666,6 +1667,20 @@ impl ChatWidget {
     pub(crate) fn toggle_gemini_thinking(&mut self) -> bool {
         let enabled = !self.gemini_thinking_visible.load(Ordering::Relaxed);
         self.set_gemini_thinking_visible(enabled);
+        enabled
+    }
+
+    pub(crate) fn diff_expanded_state(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.diff_expanded)
+    }
+
+    pub(crate) fn set_diff_expanded(&mut self, enabled: bool) {
+        self.diff_expanded.store(enabled, Ordering::Relaxed);
+    }
+
+    pub(crate) fn toggle_diff_expanded(&mut self) -> bool {
+        let enabled = !self.diff_expanded.load(Ordering::Relaxed);
+        self.set_diff_expanded(enabled);
         enabled
     }
 

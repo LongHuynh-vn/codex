@@ -113,6 +113,8 @@ pub struct TuiGlobalKeymap {
     pub toggle_raw_output: Option<KeybindingsSpec>,
     /// Toggle Gemini thinking summaries in the transcript.
     pub toggle_gemini_thinking: Option<KeybindingsSpec>,
+    /// Toggle large diff expansion in the transcript.
+    pub toggle_diff_expanded: Option<KeybindingsSpec>,
 }
 
 /// Chat context keybindings.

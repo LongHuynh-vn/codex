@@ -94,6 +94,7 @@ pub(super) const KEYMAP_ACTIONS: &[KeymapActionDescriptor] = &[
     gated_action("global", "Global", "toggle_fast_mode", "Turn Fast mode on or off.", KeymapActionFeature::FastMode),
     action("global", "Global", "toggle_raw_output", "Toggle raw scrollback mode."),
     action("global", "Global", "toggle_gemini_thinking", "Toggle Gemini thinking summaries."),
+    action("global", "Global", "toggle_diff_expanded", "Toggle large diff expansion."),
     action("chat", "Chat", "interrupt_turn", "Interrupt the active turn."),
     action("chat", "Chat", "decrease_reasoning_effort", "Decrease reasoning effort."),
     action("chat", "Chat", "increase_reasoning_effort", "Increase reasoning effort."),
@@ -240,6 +241,7 @@ pub(super) fn binding_slot<'a>(
         ("global", "toggle_gemini_thinking") => {
             Some(&mut keymap.global.toggle_gemini_thinking)
         }
+        ("global", "toggle_diff_expanded") => Some(&mut keymap.global.toggle_diff_expanded),
         ("chat", "interrupt_turn") => Some(&mut keymap.chat.interrupt_turn),
         ("chat", "decrease_reasoning_effort") => Some(&mut keymap.chat.decrease_reasoning_effort),
         ("chat", "increase_reasoning_effort") => Some(&mut keymap.chat.increase_reasoning_effort),
@@ -367,6 +369,9 @@ pub(super) fn bindings_for_action<'a>(
         ("global", "toggle_raw_output") => Some(runtime_keymap.app.toggle_raw_output.as_slice()),
         ("global", "toggle_gemini_thinking") => {
             Some(runtime_keymap.app.toggle_gemini_thinking.as_slice())
+        }
+        ("global", "toggle_diff_expanded") => {
+            Some(runtime_keymap.app.toggle_diff_expanded.as_slice())
         }
         ("chat", "interrupt_turn") => Some(runtime_keymap.chat.interrupt_turn.as_slice()),
         ("chat", "decrease_reasoning_effort") => Some(runtime_keymap.chat.decrease_reasoning_effort.as_slice()),

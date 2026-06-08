@@ -8,7 +8,11 @@ use super::*;
 impl ChatWidget {
     pub(super) fn on_patch_apply_begin(&mut self, changes: HashMap<PathBuf, FileChange>) {
         self.record_visible_turn_activity();
-        self.add_to_history(history_cell::new_patch_event(changes, &self.config.cwd));
+        self.add_to_history(history_cell::new_patch_event(
+            changes,
+            &self.config.cwd,
+            Arc::clone(&self.diff_expanded),
+        ));
     }
 
     pub(super) fn on_view_image_tool_call(&mut self, path: AbsolutePathBuf) {

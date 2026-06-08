@@ -23,6 +23,9 @@ use ratatui::layout::Rect;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use codex_app_server_protocol::CommandExecutionSource as ExecCommandSource;
 use codex_protocol::mcp::CallToolResult;
@@ -150,6 +153,131 @@ fn assert_unstyled_lines(lines: &[Line<'static>]) {
             assert_eq!(span.style, Style::default());
         }
     }
+}
+
+fn numbered_lines(prefix: &str, count: usize) -> String {
+    (1..=count)
+        .map(|line| format!("{prefix} {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn large_add_patch_cell_collapses_by_default() {
+    let mut changes = HashMap::new();
+    changes.insert(
+        PathBuf::from("big.txt"),
+        FileChange::Add {
+            content: numbered_lines("line", 21),
+        },
+    );
+    let cell = new_patch_event(changes, &test_cwd(), Arc::new(AtomicBool::new(/*v*/ false)));
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 120));
+
+    assert_eq!(
+        rendered,
+        vec![
+            "• Added big.txt (+21 -0)",
+            "  └ … 21 more lines — Option+X to expand",
+        ]
+    );
+}
+
+#[test]
+fn large_edit_patch_cell_collapses_by_default() {
+    let original = numbered_lines("old", 21);
+    let modified = numbered_lines("new", 21);
+    let mut changes = HashMap::new();
+    changes.insert(
+        PathBuf::from("big.txt"),
+        FileChange::Update {
+            unified_diff: diffy::create_patch(&original, &modified).to_string(),
+            move_path: None,
+        },
+    );
+    let cell = new_patch_event(changes, &test_cwd(), Arc::new(AtomicBool::new(/*v*/ false)));
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 120));
+
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(rendered[0], "• Edited big.txt (+21 -21)");
+    assert!(rendered[1].contains("Option+X to expand"));
+}
+
+#[test]
+fn patch_cell_expands_when_diff_toggle_is_enabled() {
+    let diff_expanded = Arc::new(AtomicBool::new(/*v*/ false));
+    let mut changes = HashMap::new();
+    changes.insert(
+        PathBuf::from("big.txt"),
+        FileChange::Add {
+            content: numbered_lines("line", 21),
+        },
+    );
+    let cell = new_patch_event(changes, &test_cwd(), Arc::clone(&diff_expanded));
+
+    let collapsed = render_lines(&cell.display_lines(/*width*/ 120));
+    assert!(collapsed[1].contains("Option+X to expand"));
+
+    diff_expanded.store(/*val*/ true, Ordering::Relaxed);
+    let expanded = render_lines(&cell.display_lines(/*width*/ 120));
+    assert!(expanded.iter().any(|line| line.contains("line 21")));
+    assert!(
+        !expanded
+            .iter()
+            .any(|line| line.contains("Option+X to expand"))
+    );
+}
+
+#[test]
+fn patch_cell_at_threshold_renders_full_diff() {
+    let mut changes = HashMap::new();
+    changes.insert(
+        PathBuf::from("small.txt"),
+        FileChange::Add {
+            content: numbered_lines("line", 20),
+        },
+    );
+    let cell = new_patch_event(changes, &test_cwd(), Arc::new(AtomicBool::new(/*v*/ false)));
+
+    let rendered = render_lines(&cell.display_lines(/*width*/ 120));
+
+    assert!(rendered.iter().any(|line| line.contains("line 20")));
+    assert!(
+        !rendered
+            .iter()
+            .any(|line| line.contains("Option+X to expand"))
+    );
+}
+
+#[test]
+fn patch_cell_raw_and_transcript_lines_remain_full_when_display_is_collapsed() {
+    let mut changes = HashMap::new();
+    changes.insert(
+        PathBuf::from("big.txt"),
+        FileChange::Add {
+            content: numbered_lines("line", 21),
+        },
+    );
+    let cell = new_patch_event(changes, &test_cwd(), Arc::new(AtomicBool::new(/*v*/ false)));
+
+    let display = render_lines(&cell.display_lines(/*width*/ 120));
+    let raw = render_lines(&cell.raw_lines());
+    let transcript = render_lines(&cell.transcript_lines(/*width*/ 120));
+
+    assert!(
+        display
+            .iter()
+            .any(|line| line.contains("Option+X to expand"))
+    );
+    assert!(raw.iter().any(|line| line.contains("line 21")));
+    assert!(transcript.iter().any(|line| line.contains("line 21")));
+    assert!(
+        !raw.iter()
+            .chain(transcript.iter())
+            .any(|line| line.contains("Option+X to expand"))
+    );
 }
 
 fn image_block(data: &str) -> serde_json::Value {

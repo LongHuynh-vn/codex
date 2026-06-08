@@ -71,6 +71,8 @@ pub(crate) struct AppKeymap {
     pub(crate) toggle_raw_output: Vec<KeyBinding>,
     /// Toggle Gemini thinking summaries in the transcript.
     pub(crate) toggle_gemini_thinking: Vec<KeyBinding>,
+    /// Toggle large diff expansion in the transcript.
+    pub(crate) toggle_diff_expanded: Vec<KeyBinding>,
 }
 
 /// Chat-level keybindings evaluated at the app event layer.
@@ -427,6 +429,11 @@ impl RuntimeKeymap {
                 keymap.global.toggle_gemini_thinking.as_ref(),
                 &defaults.app.toggle_gemini_thinking,
                 "tui.keymap.global.toggle_gemini_thinking",
+            )?,
+            toggle_diff_expanded: resolve_bindings(
+                keymap.global.toggle_diff_expanded.as_ref(),
+                &defaults.app.toggle_diff_expanded,
+                "tui.keymap.global.toggle_diff_expanded",
             )?,
         };
 
@@ -803,6 +810,10 @@ impl RuntimeKeymap {
                 keymap.global.toggle_gemini_thinking.as_ref(),
                 app.toggle_gemini_thinking.as_slice(),
             ),
+            (
+                keymap.global.toggle_diff_expanded.as_ref(),
+                app.toggle_diff_expanded.as_slice(),
+            ),
             (keymap.list.move_up.as_ref(), list_move_up.as_slice()),
             (keymap.list.move_down.as_ref(), list_move_down.as_slice()),
             (keymap.list.accept.as_ref(), list_accept.as_slice()),
@@ -911,6 +922,7 @@ impl RuntimeKeymap {
                 toggle_fast_mode: default_bindings![],
                 toggle_raw_output: default_bindings![alt(KeyCode::Char('r'))],
                 toggle_gemini_thinking: default_bindings![alt(KeyCode::Char('t'))],
+                toggle_diff_expanded: default_bindings![alt(KeyCode::Char('x'))],
             },
             chat: ChatKeymap {
                 interrupt_turn: default_bindings![plain(KeyCode::Esc)],
@@ -1168,6 +1180,10 @@ impl RuntimeKeymap {
                     "toggle_gemini_thinking",
                     self.app.toggle_gemini_thinking.as_slice(),
                 ),
+                (
+                    "toggle_diff_expanded",
+                    self.app.toggle_diff_expanded.as_slice(),
+                ),
                 ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
                 (
                     "chat.decrease_reasoning_effort",
@@ -1214,6 +1230,10 @@ impl RuntimeKeymap {
                 (
                     "toggle_gemini_thinking",
                     self.app.toggle_gemini_thinking.as_slice(),
+                ),
+                (
+                    "toggle_diff_expanded",
+                    self.app.toggle_diff_expanded.as_slice(),
                 ),
                 ("chat.interrupt_turn", self.chat.interrupt_turn.as_slice()),
                 (
@@ -1267,6 +1287,10 @@ impl RuntimeKeymap {
                 (
                     "toggle_gemini_thinking",
                     self.app.toggle_gemini_thinking.as_slice(),
+                ),
+                (
+                    "toggle_diff_expanded",
+                    self.app.toggle_diff_expanded.as_slice(),
                 ),
             ],
             [
@@ -1345,6 +1369,10 @@ impl RuntimeKeymap {
                 (
                     "toggle_gemini_thinking",
                     self.app.toggle_gemini_thinking.as_slice(),
+                ),
+                (
+                    "toggle_diff_expanded",
+                    self.app.toggle_diff_expanded.as_slice(),
                 ),
                 (
                     "composer.history_search_previous",
@@ -2780,6 +2808,36 @@ mod tests {
         keymap.global.toggle_gemini_thinking = Some(one("ctrl-o"));
 
         expect_conflict(&keymap, "copy", "toggle_gemini_thinking");
+    }
+
+    #[test]
+    fn diff_expanded_toggle_defaults_to_alt_x() {
+        let runtime = RuntimeKeymap::defaults();
+        assert_eq!(
+            runtime.app.toggle_diff_expanded,
+            vec![key_hint::alt(KeyCode::Char('x'))]
+        );
+    }
+
+    #[test]
+    fn diff_expanded_toggle_can_be_remapped() {
+        let mut keymap = TuiKeymap::default();
+        keymap.global.toggle_diff_expanded = Some(one("f10"));
+
+        let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+
+        assert_eq!(
+            runtime.app.toggle_diff_expanded,
+            vec![key_hint::plain(KeyCode::F(10))]
+        );
+    }
+
+    #[test]
+    fn diff_expanded_toggle_conflicts_with_existing_main_surface_bindings() {
+        let mut keymap = TuiKeymap::default();
+        keymap.global.toggle_diff_expanded = Some(one("ctrl-o"));
+
+        expect_conflict(&keymap, "copy", "toggle_diff_expanded");
     }
 
     #[test]

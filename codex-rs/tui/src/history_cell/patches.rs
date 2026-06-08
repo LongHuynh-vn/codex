@@ -1,16 +1,35 @@
 //! Patch summaries and image-tool transcript helpers.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+use crate::diff_render::calculate_add_remove_from_diff;
+
 use super::*;
+
+const DIFF_COLLAPSE_THRESHOLD: usize = 20;
 
 #[derive(Debug)]
 pub(crate) struct PatchHistoryCell {
     changes: HashMap<PathBuf, FileChange>,
     cwd: PathBuf,
+    diff_expanded: Arc<AtomicBool>,
 }
 
 impl HistoryCell for PatchHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        create_diff_summary(&self.changes, &self.cwd, width as usize)
+        let mut lines = create_diff_summary(&self.changes, &self.cwd, width as usize);
+        if self.should_collapse() && lines.len() > 1 {
+            let hidden_body_lines = lines.len() - 1;
+            lines.truncate(1);
+            lines.push(
+                format!("  └ … {hidden_body_lines} more lines — Option+X to expand")
+                    .dim()
+                    .into(),
+            );
+        }
+        lines
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -20,6 +39,30 @@ impl HistoryCell for PatchHistoryCell {
             RAW_DIFF_SUMMARY_WIDTH,
         ))
     }
+
+    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        create_diff_summary(&self.changes, &self.cwd, width as usize)
+    }
+}
+
+impl PatchHistoryCell {
+    fn should_collapse(&self) -> bool {
+        !self.diff_expanded.load(Ordering::Relaxed)
+            && changed_line_count(&self.changes) > DIFF_COLLAPSE_THRESHOLD
+    }
+}
+
+fn changed_line_count(changes: &HashMap<PathBuf, FileChange>) -> usize {
+    changes
+        .values()
+        .map(|change| match change {
+            FileChange::Add { content } | FileChange::Delete { content } => content.lines().count(),
+            FileChange::Update { unified_diff, .. } => {
+                let (added, removed) = calculate_add_remove_from_diff(unified_diff);
+                added + removed
+            }
+        })
+        .sum()
 }
 /// Create a new `PendingPatch` cell that lists the file‑level summary of
 /// a proposed patch. The summary lines should already be formatted (e.g.
@@ -27,10 +70,12 @@ impl HistoryCell for PatchHistoryCell {
 pub(crate) fn new_patch_event(
     changes: HashMap<PathBuf, FileChange>,
     cwd: &Path,
+    diff_expanded: Arc<AtomicBool>,
 ) -> PatchHistoryCell {
     PatchHistoryCell {
         changes,
         cwd: cwd.to_path_buf(),
+        diff_expanded,
     }
 }
 
