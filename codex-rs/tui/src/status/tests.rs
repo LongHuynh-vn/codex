@@ -1295,7 +1295,7 @@ async fn status_snapshot_hides_when_has_no_credits_flag() {
 }
 
 #[tokio::test]
-async fn status_card_token_usage_excludes_cached_tokens() {
+async fn status_card_token_usage_shows_cached_and_thinking_breakdown() {
     let temp_home = TempDir::new().expect("temp home");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
@@ -1306,8 +1306,8 @@ async fn status_card_token_usage_excludes_cached_tokens() {
         input_tokens: 1_200,
         cached_input_tokens: 200,
         output_tokens: 900,
-        reasoning_output_tokens: 0,
-        total_tokens: 2_100,
+        reasoning_output_tokens: 150,
+        total_tokens: 2_250,
     };
 
     let now = chrono::Local
@@ -1334,9 +1334,13 @@ async fn status_card_token_usage_excludes_cached_tokens() {
     );
     let rendered = render_lines(&composite.display_lines(/*width*/ 120));
 
+    let token_usage_line = rendered
+        .iter()
+        .find(|line| line.contains("Token usage:"))
+        .expect("status card should render token usage");
     assert!(
-        rendered.iter().all(|line| !line.contains("cached")),
-        "cached tokens should not be displayed, got: {rendered:?}"
+        token_usage_line.contains("1.9K total  (1K input + 900 output; 150 thinking; 200 cached)"),
+        "unexpected token usage line: {token_usage_line}"
     );
 }
 

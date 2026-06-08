@@ -67,6 +67,8 @@ pub(crate) struct StatusTokenUsageData {
     total: i64,
     input: i64,
     output: i64,
+    cached: i64,
+    reasoning: i64,
     context_window: Option<StatusContextWindowData>,
 }
 
@@ -338,6 +340,8 @@ impl StatusHistoryCell {
             total: total_usage.blended_total(),
             input: total_usage.non_cached_input(),
             output: total_usage.output_tokens,
+            cached: total_usage.cached_input(),
+            reasoning: total_usage.reasoning_output_tokens.max(0),
             context_window,
         };
         let rate_limits = if rate_limits.len() <= 1 {
@@ -377,8 +381,10 @@ impl StatusHistoryCell {
         let total_fmt = format_tokens_compact(self.token_usage.total);
         let input_fmt = format_tokens_compact(self.token_usage.input);
         let output_fmt = format_tokens_compact(self.token_usage.output);
+        let cached_fmt = format_tokens_compact(self.token_usage.cached);
+        let reasoning_fmt = format_tokens_compact(self.token_usage.reasoning);
 
-        vec![
+        let mut spans = vec![
             Span::from(total_fmt),
             Span::from(" total "),
             Span::from(" (").dim(),
@@ -387,8 +393,19 @@ impl StatusHistoryCell {
             Span::from(" + ").dim(),
             Span::from(output_fmt).dim(),
             Span::from(" output").dim(),
-            Span::from(")").dim(),
-        ]
+        ];
+        if self.token_usage.reasoning > 0 {
+            spans.push(Span::from("; ").dim());
+            spans.push(Span::from(reasoning_fmt).dim());
+            spans.push(Span::from(" thinking").dim());
+        }
+        if self.token_usage.cached > 0 {
+            spans.push(Span::from("; ").dim());
+            spans.push(Span::from(cached_fmt).dim());
+            spans.push(Span::from(" cached").dim());
+        }
+        spans.push(Span::from(")").dim());
+        spans
     }
 
     fn context_window_spans(&self) -> Option<Vec<Span<'static>>> {
