@@ -1,4 +1,6 @@
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_tools::AdditionalProperties;
@@ -249,6 +251,210 @@ fn serializes_parallel_function_calls_before_results_by_call_id() {
 }
 
 #[test]
+fn serializes_function_output_image_as_nested_function_response_part() {
+    let output = FunctionCallOutputPayload {
+        body: FunctionCallOutputBody::ContentItems(vec![
+            FunctionCallOutputContentItem::InputImage {
+                image_url: "data:image/png;base64,AAA".to_string(),
+                detail: None,
+            },
+        ]),
+        success: Some(true),
+    };
+
+    let value = request_value_for_function_output(output);
+    let function_response = &value["contents"][2]["parts"][0]["functionResponse"];
+
+    assert_eq!(
+        function_response,
+        &json!({
+            "name": "get_weather",
+            "response": {
+                "output": "Image output attached.",
+                "success": true
+            },
+            "parts": [
+                {
+                    "inlineData": {
+                        "mimeType": "image/png",
+                        "data": "AAA"
+                    }
+                }
+            ]
+        })
+    );
+    assert!(!function_response["response"].to_string().contains("AAA"));
+}
+
+#[test]
+fn serializes_text_content_items_without_nested_parts() {
+    let output = FunctionCallOutputPayload {
+        body: FunctionCallOutputBody::ContentItems(vec![
+            FunctionCallOutputContentItem::InputText {
+                text: "weather Paris".to_string(),
+            },
+        ]),
+        success: None,
+    };
+
+    let value = request_value_for_function_output(output);
+    let function_response = &value["contents"][2]["parts"][0]["functionResponse"];
+
+    assert_eq!(
+        function_response,
+        &json!({
+            "name": "get_weather",
+            "response": {
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "weather Paris"
+                    }
+                ]
+            }
+        })
+    );
+}
+
+#[test]
+fn serializes_mixed_content_items_with_images_nested() {
+    let output = FunctionCallOutputPayload {
+        body: FunctionCallOutputBody::ContentItems(vec![
+            FunctionCallOutputContentItem::InputText {
+                text: "chart follows".to_string(),
+            },
+            FunctionCallOutputContentItem::InputImage {
+                image_url: "data:image/jpeg;base64,BBB".to_string(),
+                detail: None,
+            },
+            FunctionCallOutputContentItem::EncryptedContent {
+                encrypted_content: "enc-1".to_string(),
+            },
+        ]),
+        success: Some(true),
+    };
+
+    let value = request_value_for_function_output(output);
+    let function_response = &value["contents"][2]["parts"][0]["functionResponse"];
+
+    assert_eq!(
+        function_response,
+        &json!({
+            "name": "get_weather",
+            "response": {
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "chart follows"
+                    },
+                    {
+                        "type": "encrypted_content",
+                        "encrypted_content": "enc-1"
+                    }
+                ],
+                "success": true
+            },
+            "parts": [
+                {
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
+                        "data": "BBB"
+                    }
+                }
+            ]
+        })
+    );
+}
+
+#[test]
+fn serializes_parallel_function_output_images_inside_matching_response_part() {
+    let mut catalog = gemini_model_catalog();
+    let model_info = catalog.models.remove(0);
+    let prompt = GeminiPrompt {
+        instructions: "You are Codex.".to_string(),
+        input: vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "Get weather for Paris and London.".to_string(),
+                }],
+                phase: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "get_weather".to_string(),
+                namespace: None,
+                arguments: r#"{"city":"Paris"}"#.to_string(),
+                call_id: "call-paris".to_string(),
+                thought_signature: Some("sig-paris".to_string()),
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "get_weather".to_string(),
+                namespace: None,
+                arguments: r#"{"city":"London"}"#.to_string(),
+                call_id: "call-london".to_string(),
+                thought_signature: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: "call-london".to_string(),
+                output: FunctionCallOutputPayload::from_text("weather London".to_string()),
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: "call-paris".to_string(),
+                output: FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::ContentItems(vec![
+                        FunctionCallOutputContentItem::InputImage {
+                            image_url: "data:image/webp;base64,CCC".to_string(),
+                            detail: None,
+                        },
+                    ]),
+                    success: Some(true),
+                },
+            },
+        ],
+        tools: vec![weather_tool()],
+        output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
+    };
+
+    let request =
+        build_generate_content_request(&prompt, &model_info, Some(ReasoningEffort::Low)).unwrap();
+    let value = serde_json::to_value(request).unwrap();
+
+    assert_eq!(
+        value["contents"][2]["parts"],
+        json!([
+            {
+                "functionResponse": {
+                    "name": "get_weather",
+                    "response": {
+                        "output": "Image output attached.",
+                        "success": true
+                    },
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": "image/webp",
+                                "data": "CCC"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "functionResponse": {
+                    "name": "get_weather",
+                    "response": {"output": "weather London"}
+                }
+            }
+        ])
+    );
+}
+
+#[test]
 fn normalizes_system_instruction_without_truncating_content() {
     let mut catalog = gemini_model_catalog();
     let model_info = catalog.models.remove(0);
@@ -447,4 +653,42 @@ fn weather_tool() -> ToolSpec {
         ),
         output_schema: None,
     })
+}
+
+fn request_value_for_function_output(output: FunctionCallOutputPayload) -> serde_json::Value {
+    let mut catalog = gemini_model_catalog();
+    let model_info = catalog.models.remove(0);
+    let prompt = GeminiPrompt {
+        instructions: "You are Codex.".to_string(),
+        input: vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "run the step tool".to_string(),
+                }],
+                phase: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "get_weather".to_string(),
+                namespace: None,
+                arguments: r#"{"city":"Paris"}"#.to_string(),
+                call_id: "call-1".to_string(),
+                thought_signature: Some("sig-1".to_string()),
+            },
+            ResponseItem::FunctionCallOutput {
+                call_id: "call-1".to_string(),
+                output,
+            },
+        ],
+        tools: vec![weather_tool()],
+        output_schema: None,
+        tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
+    };
+
+    let request =
+        build_generate_content_request(&prompt, &model_info, Some(ReasoningEffort::High)).unwrap();
+    serde_json::to_value(request).unwrap()
 }

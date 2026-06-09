@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::WebSearchItem;
@@ -42,6 +43,7 @@ const TAVILY_SEARCH_DEPTH_ENV: &str = "CODEX_TAVILY_SEARCH_DEPTH";
 const TAVILY_DEFAULT_SEARCH_LIMIT_ENV: &str = "CODEX_TAVILY_DEFAULT_SEARCH_LIMIT";
 const DEFAULT_FETCH_MAX_BYTES: usize = 20_000;
 const MAX_FETCH_MAX_BYTES: usize = 50_000;
+const MAX_IMAGES_ON_PAGE: usize = 20;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ClientWebConfig {
@@ -500,11 +502,11 @@ impl ToolExecutor<ToolInvocation> for ClientWebFetchHandler {
                 FunctionCallError::RespondToModel(format!("web_fetch response read failed: {err}"))
             })?;
             let body = if content_type.to_ascii_lowercase().contains("html") {
-                html_to_text(&body)
+                let image_urls = extract_image_urls(&body, &url);
+                append_image_urls(truncate_text(&html_to_text(&body), max_bytes), image_urls)
             } else {
-                body
+                truncate_text(&body, max_bytes)
             };
-            let body = truncate_text(&body, max_bytes);
             let output =
                 format!("URL: {url}\nStatus: {status}\nContent-Type: {content_type}\n\n{body}");
             Ok(boxed_tool_output(FunctionToolOutput::from_content(
@@ -644,6 +646,122 @@ fn html_to_text(input: &str) -> String {
         }
     }
     normalize_whitespace(&decode_basic_html_entities(&output))
+}
+
+fn append_image_urls(mut body: String, image_urls: Vec<String>) -> String {
+    if image_urls.is_empty() {
+        return body;
+    }
+    if !body.is_empty() {
+        body.push_str("\n\n");
+    }
+    body.push_str("Images on page:");
+    for image_url in image_urls {
+        body.push_str("\n- ");
+        body.push_str(&image_url);
+    }
+    body
+}
+
+fn extract_image_urls(input: &str, base_url: &Url) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut seen = HashSet::new();
+    let lowercase = input.to_ascii_lowercase();
+    let mut offset = 0;
+
+    while let Some(relative_start) = lowercase[offset..].find("<img") {
+        let start = offset + relative_start;
+        let after_name = start + "<img".len();
+        if !is_img_tag_boundary(lowercase.as_bytes(), after_name) {
+            offset = after_name;
+            continue;
+        }
+        let relative_end = lowercase[start..]
+            .find('>')
+            .unwrap_or(lowercase.len() - start);
+        let end = start + relative_end;
+        let tag = &input[start..end];
+        if let Some(src) = extract_src_attr(tag)
+            && let Ok(url) = base_url.join(src.trim())
+            && matches!(url.scheme(), "http" | "https")
+        {
+            let url = url.to_string();
+            if seen.insert(url.clone()) {
+                urls.push(url);
+                if urls.len() >= MAX_IMAGES_ON_PAGE {
+                    break;
+                }
+            }
+        }
+        offset = (end + 1).min(lowercase.len());
+    }
+
+    urls
+}
+
+fn is_img_tag_boundary(bytes: &[u8], index: usize) -> bool {
+    match bytes.get(index) {
+        None => true,
+        Some(b'/' | b'>') => true,
+        Some(byte) => byte.is_ascii_whitespace(),
+    }
+}
+
+fn extract_src_attr(tag: &str) -> Option<String> {
+    let bytes = tag.as_bytes();
+    let mut index = "<img".len();
+    while index < bytes.len() {
+        while index < bytes.len()
+            && (bytes[index].is_ascii_whitespace() || matches!(bytes[index], b'/' | b'>'))
+        {
+            index += 1;
+        }
+        let name_start = index;
+        while index < bytes.len()
+            && !bytes[index].is_ascii_whitespace()
+            && !matches!(bytes[index], b'=' | b'/' | b'>')
+        {
+            index += 1;
+        }
+        if name_start == index {
+            break;
+        }
+        let name = &tag[name_start..index];
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'=') {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let value = if matches!(bytes.get(index), Some(b'"' | b'\'')) {
+            let quote = bytes[index];
+            index += 1;
+            let value_start = index;
+            while index < bytes.len() && bytes[index] != quote {
+                index += 1;
+            }
+            let value = &tag[value_start..index];
+            if index < bytes.len() {
+                index += 1;
+            }
+            value
+        } else {
+            let value_start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() && bytes[index] != b'>'
+            {
+                index += 1;
+            }
+            &tag[value_start..index]
+        };
+        if name.eq_ignore_ascii_case("src") {
+            return Some(decode_basic_html_entities(value.trim()));
+        }
+    }
+    None
 }
 
 fn decode_basic_html_entities(input: &str) -> String {

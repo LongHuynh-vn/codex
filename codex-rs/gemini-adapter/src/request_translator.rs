@@ -66,6 +66,8 @@ pub(crate) struct FunctionCall {
 pub(crate) struct FunctionResponse {
     pub(crate) name: String,
     pub(crate) response: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) parts: Option<Vec<Part>>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -287,10 +289,12 @@ fn contents_from_response_items(
                                 "Gemini function response is missing function call name for call_id `{call_id}`"
                             ))
                         })?;
+                        let output_response = function_output_response(output)?;
                         response_parts.push(Part {
                             function_response: Some(FunctionResponse {
                                 name: call.name.clone(),
-                                response: function_output_response(output)?,
+                                response: output_response.response,
+                                parts: output_response.parts,
                             }),
                             ..Part::default()
                         });
@@ -309,12 +313,14 @@ fn contents_from_response_items(
                         "Gemini function response is missing function call name for call_id `{call_id}`"
                     ))
                 })?;
+                let output_response = function_output_response(output)?;
                 contents.push(Content {
                     role: "user".to_string(),
                     parts: vec![Part {
                         function_response: Some(FunctionResponse {
                             name: call.name.clone(),
-                            response: function_output_response(output)?,
+                            response: output_response.response,
+                            parts: output_response.parts,
                         }),
                         ..Part::default()
                     }],
@@ -381,20 +387,64 @@ fn image_part(image_url: &str) -> Result<Part> {
     })
 }
 
-fn function_output_response(output: &FunctionCallOutputPayload) -> Result<Value> {
+struct FunctionOutputResponse {
+    response: Value,
+    parts: Option<Vec<Part>>,
+}
+
+fn function_output_response(output: &FunctionCallOutputPayload) -> Result<FunctionOutputResponse> {
     let mut response = serde_json::Map::new();
-    match &output.body {
+    let parts = match &output.body {
         FunctionCallOutputBody::Text(text) => {
             response.insert("output".to_string(), Value::String(text.clone()));
+            None
         }
         FunctionCallOutputBody::ContentItems(items) => {
-            response.insert("output".to_string(), content_items_response(items)?);
+            let content_response = content_items_response(items)?;
+            response.insert("output".to_string(), content_response.output);
+            content_response.parts
         }
-    }
+    };
     if let Some(success) = output.success {
         response.insert("success".to_string(), Value::Bool(success));
     }
-    Ok(Value::Object(response))
+    Ok(FunctionOutputResponse {
+        response: Value::Object(response),
+        parts,
+    })
+}
+
+struct ContentItemsResponse {
+    output: Value,
+    parts: Option<Vec<Part>>,
+}
+
+fn content_items_response(items: &[FunctionCallOutputContentItem]) -> Result<ContentItemsResponse> {
+    let mut output_items = Vec::with_capacity(items.len());
+    let mut image_parts = Vec::new();
+
+    for item in items {
+        match item {
+            FunctionCallOutputContentItem::InputImage { image_url, .. } => {
+                image_parts.push(image_part(image_url)?);
+            }
+            FunctionCallOutputContentItem::InputText { .. }
+            | FunctionCallOutputContentItem::EncryptedContent { .. } => {
+                output_items.push(item.clone());
+            }
+        }
+    }
+
+    let output = if image_parts.is_empty() {
+        serde_json::to_value(items)?
+    } else if output_items.is_empty() {
+        Value::String("Image output attached.".to_string())
+    } else {
+        serde_json::to_value(output_items)?
+    };
+    let parts = (!image_parts.is_empty()).then_some(image_parts);
+
+    Ok(ContentItemsResponse { output, parts })
 }
 
 fn function_call_args(arguments: &str) -> Result<Value> {
@@ -406,10 +456,6 @@ fn function_call_args(arguments: &str) -> Result<Value> {
             "Gemini functionCall args must be a JSON object".to_string(),
         ))
     }
-}
-
-fn content_items_response(items: &[FunctionCallOutputContentItem]) -> Result<Value> {
-    serde_json::to_value(items).map_err(Into::into)
 }
 
 fn thinking_level(effort: Option<ReasoningEffort>) -> String {

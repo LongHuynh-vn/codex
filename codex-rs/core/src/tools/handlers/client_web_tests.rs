@@ -574,6 +574,10 @@ async fn web_fetch_executes_client_side_http_get() {
         ),
         "unexpected web_fetch output: {text}"
     );
+    assert!(
+        !text.contains("Images on page:"),
+        "unexpected image list: {text}"
+    );
     assert_web_search_item_events(
         &rx,
         "call-web_fetch",
@@ -583,6 +587,94 @@ async fn web_fetch_executes_client_side_http_get() {
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn web_fetch_appends_image_urls_from_html() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/reports/page.html"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"
+            <html>
+              <body>
+                <h1>Report</h1>
+                <img src="chart.png">
+                <IMG SRC='/figures/plot.webp'>
+                <img src="https://cdn.example.com/abs.jpg">
+                <img src='//assets.example.com/protocol.png'>
+                <img data-src="/lazy.png">
+                <img src="chart.png">
+                <img src=unquoted.gif>
+              </body>
+            </html>
+            "#,
+            "text/html; charset=utf-8",
+        ))
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/reports/page.html", server.uri());
+    let handler = ClientWebFetchHandler::new(Client::new());
+    let payload = ToolPayload::Function {
+        arguments: json!({"url": url.clone(), "max_bytes": 2000}).to_string(),
+    };
+    let (invocation, _) = invocation_with_rx(
+        WEB_FETCH_TOOL_NAME,
+        json!({"url": url.clone(), "max_bytes": 2000}),
+    )
+    .await;
+    let output = handler
+        .handle(invocation)
+        .await
+        .expect("web fetch should succeed");
+    let text = function_output_text(output.to_response_item("call-web-fetch", &payload));
+
+    let relative_chart = format!("{}/reports/chart.png", server.uri());
+    assert!(
+        text.contains("\n\nImages on page:\n- "),
+        "missing image list: {text}"
+    );
+    assert!(
+        text.contains(&format!("- {relative_chart}")),
+        "missing relative image URL: {text}"
+    );
+    assert!(
+        text.contains(&format!("- {}/figures/plot.webp", server.uri())),
+        "missing root-relative image URL: {text}"
+    );
+    assert!(
+        text.contains("- https://cdn.example.com/abs.jpg"),
+        "missing absolute image URL: {text}"
+    );
+    assert!(
+        text.contains("- http://assets.example.com/protocol.png"),
+        "missing protocol-relative image URL: {text}"
+    );
+    assert!(
+        text.contains(&format!("- {}/reports/unquoted.gif", server.uri())),
+        "missing unquoted image URL: {text}"
+    );
+    assert_eq!(text.matches(&relative_chart).count(), 1);
+    assert!(
+        !text.contains("/lazy.png"),
+        "data-src should be ignored: {text}"
+    );
+}
+
+#[test]
+fn web_fetch_image_url_extraction_caps_and_deduplicates() {
+    let base = Url::parse("https://example.com/dir/page.html").expect("base URL should parse");
+    let html = (0..25)
+        .map(|index| format!(r#"<img src="image-{index}.png"><img src="image-{index}.png">"#))
+        .collect::<String>();
+
+    let image_urls = extract_image_urls(&html, &base);
+
+    assert_eq!(image_urls.len(), MAX_IMAGES_ON_PAGE);
+    assert_eq!(image_urls[0], "https://example.com/dir/image-0.png");
+    assert_eq!(image_urls[19], "https://example.com/dir/image-19.png");
+    assert!(!image_urls.iter().any(|url| url.ends_with("image-20.png")));
 }
 
 #[tokio::test]

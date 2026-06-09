@@ -29,6 +29,7 @@ use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandler;
 use crate::tools::handlers::UpdateGoalHandler;
 use crate::tools::handlers::ViewImageHandler;
+use crate::tools::handlers::ViewImageUrlHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
 use crate::tools::handlers::agent_jobs::SpawnAgentsOnCsvHandler;
@@ -571,7 +572,8 @@ fn add_client_web_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut P
     let client = build_reqwest_client();
     let config = ClientWebConfig::from_env();
     planned_tools.add(ClientWebSearchHandler::new(client.clone(), config));
-    planned_tools.add(ClientWebFetchHandler::new(client));
+    planned_tools.add(ClientWebFetchHandler::new(client.clone()));
+    planned_tools.add(ViewImageUrlHandler::new(client));
 }
 
 fn standalone_web_run_available(

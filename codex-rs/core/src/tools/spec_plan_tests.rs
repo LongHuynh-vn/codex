@@ -1354,8 +1354,8 @@ async fn gemini_uses_client_side_web_function_tools() {
     })
     .await;
 
-    plan.assert_visible_contains(&["web_search", "web_fetch"]);
-    plan.assert_registered_contains(&["web_search", "web_fetch"]);
+    plan.assert_visible_contains(&["web_search", "web_fetch", "view_image_url"]);
+    plan.assert_registered_contains(&["web_search", "web_fetch", "view_image_url"]);
     assert!(matches!(
         plan.visible_spec("web_search"),
         ToolSpec::Function(tool) if tool.name == "web_search"
@@ -1364,14 +1364,18 @@ async fn gemini_uses_client_side_web_function_tools() {
         plan.visible_spec("web_fetch"),
         ToolSpec::Function(tool) if tool.name == "web_fetch"
     ));
+    assert!(matches!(
+        plan.visible_spec("view_image_url"),
+        ToolSpec::Function(tool) if tool.name == "view_image_url"
+    ));
 
     let disabled = probe(|turn| {
         use_gemini_provider(turn);
         set_web_search_mode(turn, WebSearchMode::Disabled);
     })
     .await;
-    disabled.assert_visible_lacks(&["web_search", "web_fetch"]);
-    disabled.assert_registered_lacks(&["web_search", "web_fetch"]);
+    disabled.assert_visible_lacks(&["web_search", "web_fetch", "view_image_url"]);
+    disabled.assert_registered_lacks(&["web_search", "web_fetch", "view_image_url"]);
 
     let code_mode_only = probe(|turn| {
         use_gemini_provider(turn);
@@ -1379,6 +1383,6 @@ async fn gemini_uses_client_side_web_function_tools() {
         set_web_search_mode(turn, WebSearchMode::Live);
     })
     .await;
-    code_mode_only.assert_visible_lacks(&["web_search", "web_fetch"]);
-    code_mode_only.assert_registered_lacks(&["web_search", "web_fetch"]);
+    code_mode_only.assert_visible_lacks(&["web_search", "web_fetch", "view_image_url"]);
+    code_mode_only.assert_registered_lacks(&["web_search", "web_fetch", "view_image_url"]);
 }
