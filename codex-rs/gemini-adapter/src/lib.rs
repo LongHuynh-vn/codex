@@ -14,6 +14,7 @@ use codex_protocol::error::Result;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_tools::ToolSpec;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -50,6 +51,7 @@ pub struct GeminiPrompt {
     pub input: Vec<ResponseItem>,
     pub tools: Vec<ToolSpec>,
     pub output_schema: Option<Value>,
+    pub gemini_search_mode: Option<GeminiSearchMode>,
     pub tool_choice: GeminiToolChoice,
     pub thought_summary_display: GeminiThoughtSummaryDisplay,
 }

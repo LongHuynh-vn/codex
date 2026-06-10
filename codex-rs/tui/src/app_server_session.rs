@@ -121,6 +121,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffortPreset;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::ContextCompat;
 use color_eyre::eyre::Result;
@@ -1589,6 +1590,7 @@ async fn thread_session_state_from_thread_start_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_sources.clone(),
         response.reasoning_effort,
+        response.gemini_search_mode,
         config,
     )
     .await
@@ -1630,6 +1632,7 @@ async fn thread_session_state_from_thread_resume_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_sources.clone(),
         response.reasoning_effort,
+        response.gemini_search_mode,
         config,
     )
     .await
@@ -1662,6 +1665,7 @@ async fn thread_session_state_from_thread_fork_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_sources.clone(),
         response.reasoning_effort,
+        response.gemini_search_mode,
         config,
     )
     .await
@@ -1701,6 +1705,7 @@ async fn thread_session_state_from_thread_response(
     runtime_workspace_roots: Vec<AbsolutePathBuf>,
     instruction_source_paths: Vec<AbsolutePathBuf>,
     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
+    gemini_search_mode: GeminiSearchMode,
     config: &Config,
 ) -> Result<ThreadSessionState, String> {
     let thread_id = ThreadId::from_string(thread_id)
@@ -1731,6 +1736,7 @@ async fn thread_session_state_from_thread_response(
         reasoning_effort,
         collaboration_mode: None,
         personality: config.personality,
+        gemini_search_mode,
         message_history: Some(MessageHistoryMetadata {
             log_id,
             entry_count,
@@ -2338,6 +2344,7 @@ mod tests {
                 .into(),
             active_permission_profile: None,
             reasoning_effort: None,
+            gemini_search_mode: GeminiSearchMode::Tavily,
             initial_turns_page: None,
         };
 
@@ -2469,6 +2476,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
+            GeminiSearchMode::Tavily,
             &config,
         )
         .await
@@ -2504,6 +2512,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
+            GeminiSearchMode::Tavily,
             &config,
         )
         .await

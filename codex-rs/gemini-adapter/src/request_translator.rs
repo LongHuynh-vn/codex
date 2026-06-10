@@ -7,6 +7,7 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::GeminiSearchMode;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -117,19 +118,30 @@ pub(crate) fn build_generate_content_request(
     model_info: &ModelInfo,
     effort: Option<ReasoningEffort>,
 ) -> Result<GenerateContentRequest> {
-    let env_value = std::env::var(CODEX_GEMINI_GROUNDING_ENV_VAR).ok();
-    let google_search_grounding =
-        if google_search_grounding_enabled_for_env_value(env_value.as_deref()) {
-            GoogleSearchGrounding::Enabled
-        } else {
-            GoogleSearchGrounding::Disabled
-        };
+    let google_search_grounding = google_search_grounding_for_mode(prompt.gemini_search_mode);
     build_generate_content_request_with_grounding(
         prompt,
         model_info,
         effort,
         google_search_grounding,
     )
+}
+
+fn google_search_grounding_for_mode(mode: Option<GeminiSearchMode>) -> GoogleSearchGrounding {
+    match mode {
+        Some(GeminiSearchMode::Grounding | GeminiSearchMode::Hybrid) => {
+            GoogleSearchGrounding::Enabled
+        }
+        Some(GeminiSearchMode::Tavily | GeminiSearchMode::Off) => GoogleSearchGrounding::Disabled,
+        None => {
+            let env_value = std::env::var(CODEX_GEMINI_GROUNDING_ENV_VAR).ok();
+            if google_search_grounding_enabled_for_env_value(env_value.as_deref()) {
+                GoogleSearchGrounding::Enabled
+            } else {
+                GoogleSearchGrounding::Disabled
+            }
+        }
+    }
 }
 
 fn google_search_grounding_enabled_for_env_value(value: Option<&str>) -> bool {

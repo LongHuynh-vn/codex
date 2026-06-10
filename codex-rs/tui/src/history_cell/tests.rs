@@ -645,6 +645,7 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
         reasoning_effort: None,
         collaboration_mode: None,
         personality: None,
+        gemini_search_mode: codex_protocol::protocol::GeminiSearchMode::Tavily,
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),

@@ -214,6 +214,7 @@ async fn mocked_gemini_per_day_quota_falls_back_to_pro() {
         input: vec![user_message("Reply done.")],
         tools: Vec::new(),
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -354,6 +355,7 @@ async fn live_gemini_accepts_sanitized_complex_schema_when_auth_is_set() {
         )],
         tools: vec![complex_schema_tool()],
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -434,6 +436,7 @@ async fn live_gemini_accepts_guardian_structured_output_when_auth_is_set() {
             },
             "required": ["outcome"]
         })),
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -496,6 +499,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         input: input.clone(),
         tools: tools.clone(),
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -542,6 +546,7 @@ async fn live_gemini_parallel_calls_replay_first_signature_only_when_auth_is_set
         input,
         tools,
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -710,6 +715,7 @@ async fn live_next_function_call(
         input,
         tools,
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -955,6 +961,7 @@ async fn next_function_call(
         input,
         tools,
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };

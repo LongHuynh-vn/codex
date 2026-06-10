@@ -692,6 +692,7 @@ mod thread_processor_behavior_tests {
             reasoning_effort: None,
             reasoning_summary: None,
             personality: None,
+            gemini_search_mode: codex_protocol::protocol::GeminiSearchMode::Tavily,
             collaboration_mode: CollaborationMode {
                 mode: ModeKind::Default,
                 settings: Settings {

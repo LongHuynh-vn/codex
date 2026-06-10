@@ -11,6 +11,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +52,7 @@ pub(crate) struct ThreadSessionState {
     pub(crate) reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
     pub(crate) collaboration_mode: Option<Box<CollaborationMode>>,
     pub(crate) personality: Option<Personality>,
+    pub(crate) gemini_search_mode: GeminiSearchMode,
     pub(crate) message_history: Option<MessageHistoryMetadata>,
     pub(crate) network_proxy: Option<SessionNetworkProxyRuntime>,
     pub(crate) rollout_path: Option<PathBuf>,

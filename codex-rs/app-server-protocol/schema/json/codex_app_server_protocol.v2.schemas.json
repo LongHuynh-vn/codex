@@ -5944,6 +5944,15 @@
       "title": "FuzzyFileSearchSessionUpdatedNotification",
       "type": "object"
     },
+    "GeminiSearchMode": {
+      "enum": [
+        "tavily",
+        "grounding",
+        "hybrid",
+        "off"
+      ],
+      "type": "string"
+    },
     "GetAccountParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -13692,6 +13701,14 @@
         "cwd": {
           "$ref": "#/definitions/AbsolutePathBuf"
         },
+        "geminiSearchMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GeminiSearchMode"
+            }
+          ],
+          "default": "tavily"
+        },
         "instructionSources": {
           "default": [],
           "description": "Instruction source files currently loaded for this thread.",
@@ -15338,6 +15355,14 @@
         "cwd": {
           "$ref": "#/definitions/AbsolutePathBuf"
         },
+        "geminiSearchMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GeminiSearchMode"
+            }
+          ],
+          "default": "tavily"
+        },
         "instructionSources": {
           "default": [],
           "description": "Instruction source files currently loaded for this thread.",
@@ -15500,6 +15525,14 @@
               "type": "null"
             }
           ]
+        },
+        "geminiSearchMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GeminiSearchMode"
+            }
+          ],
+          "default": "tavily"
         },
         "model": {
           "type": "string"
@@ -15758,6 +15791,14 @@
         },
         "cwd": {
           "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        "geminiSearchMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GeminiSearchMode"
+            }
+          ],
+          "default": "tavily"
         },
         "instructionSources": {
           "default": [],

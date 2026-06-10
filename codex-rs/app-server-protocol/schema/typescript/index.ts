@@ -26,6 +26,7 @@ export type { FuzzyFileSearchResponse } from "./FuzzyFileSearchResponse";
 export type { FuzzyFileSearchResult } from "./FuzzyFileSearchResult";
 export type { FuzzyFileSearchSessionCompletedNotification } from "./FuzzyFileSearchSessionCompletedNotification";
 export type { FuzzyFileSearchSessionUpdatedNotification } from "./FuzzyFileSearchSessionUpdatedNotification";
+export type { GeminiSearchMode } from "./GeminiSearchMode";
 export type { GetAuthStatusParams } from "./GetAuthStatusParams";
 export type { GetAuthStatusResponse } from "./GetAuthStatusResponse";
 export type { GetConversationSummaryParams } from "./GetConversationSummaryParams";

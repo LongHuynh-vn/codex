@@ -239,6 +239,7 @@ mod tests {
                 },
             },
             personality: None,
+            gemini_search_mode: codex_protocol::protocol::GeminiSearchMode::Tavily,
         }
     }
 }

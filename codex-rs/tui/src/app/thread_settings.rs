@@ -10,6 +10,7 @@ use codex_app_server_protocol::ThreadSettingsUpdateParams;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::GeminiSearchMode;
 
 impl App {
     pub(super) async fn sync_active_thread_model_setting(
@@ -91,6 +92,22 @@ impl App {
         self.send_thread_settings_update(app_server, params).await;
     }
 
+    pub(super) async fn sync_active_thread_search_mode_setting(
+        &mut self,
+        app_server: &mut AppServerSession,
+        gemini_search_mode: GeminiSearchMode,
+    ) -> bool {
+        let Some(thread_id) = self.active_thread_id else {
+            return false;
+        };
+        let params = ThreadSettingsUpdateParams {
+            thread_id: thread_id.to_string(),
+            gemini_search_mode: Some(gemini_search_mode),
+            ..ThreadSettingsUpdateParams::default()
+        };
+        self.send_thread_settings_update(app_server, params).await
+    }
+
     pub(super) async fn sync_override_turn_context_settings(
         &mut self,
         app_server: &mut AppServerSession,
@@ -157,15 +174,17 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
         params: ThreadSettingsUpdateParams,
-    ) {
+    ) -> bool {
         if !thread_settings_update_has_changes(&params) {
-            return;
+            return false;
         }
         if let Err(err) = app_server.thread_settings_update(params).await {
             tracing::warn!("failed to update app-server thread settings from TUI: {err}");
             self.chat_widget
                 .add_error_message(format!("Failed to update thread settings: {err}"));
+            return false;
         }
+        true
     }
 }
 
@@ -185,6 +204,7 @@ fn apply_thread_settings_to_session(session: &mut ThreadSessionState, settings: 
     session.active_permission_profile = settings.active_permission_profile.clone().map(Into::into);
     session.set_cwd_retargeting_implicit_runtime_workspace_root(settings.cwd.clone());
     session.personality = settings.personality;
+    session.gemini_search_mode = settings.gemini_search_mode;
     let mut collaboration_mode = settings.collaboration_mode.clone();
     collaboration_mode
         .settings
@@ -206,4 +226,9 @@ fn thread_settings_update_has_changes(params: &ThreadSettingsUpdateParams) -> bo
         || params.summary.is_some()
         || params.collaboration_mode.is_some()
         || params.personality.is_some()
+        || params.gemini_search_mode.is_some()
 }
+
+#[cfg(test)]
+#[path = "thread_settings_tests.rs"]
+mod thread_settings_tests;

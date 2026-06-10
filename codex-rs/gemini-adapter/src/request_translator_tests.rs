@@ -3,6 +3,7 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_tools::AdditionalProperties;
 use codex_tools::JsonSchema;
 use codex_tools::JsonSchemaPrimitiveType;
@@ -57,6 +58,7 @@ fn builds_native_request_with_thinking_and_signature_replay() {
             output_schema: None,
         })],
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -92,6 +94,20 @@ fn parses_google_search_grounding_env_toggle() {
     assert!(google_search_grounding_enabled_for_env_value(Some(
         " TRUE "
     )));
+}
+
+#[test]
+fn gemini_search_mode_controls_google_search_grounding() {
+    let cases = [
+        (GeminiSearchMode::Tavily, GoogleSearchGrounding::Disabled),
+        (GeminiSearchMode::Grounding, GoogleSearchGrounding::Enabled),
+        (GeminiSearchMode::Hybrid, GoogleSearchGrounding::Enabled),
+        (GeminiSearchMode::Off, GoogleSearchGrounding::Disabled),
+    ];
+
+    for (mode, expected) in cases {
+        assert_eq!(google_search_grounding_for_mode(Some(mode)), expected);
+    }
 }
 
 #[test]
@@ -205,6 +221,7 @@ fn sanitizes_known_bad_tool_schema_for_gemini() {
             output_schema: None,
         })],
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -276,6 +293,7 @@ fn serializes_parallel_function_calls_before_results_by_call_id() {
         ],
         tools: vec![weather_tool()],
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -487,6 +505,7 @@ fn serializes_parallel_function_output_images_inside_matching_response_part() {
         ],
         tools: vec![weather_tool()],
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -542,6 +561,7 @@ fn normalizes_system_instruction_without_truncating_content() {
         }],
         tools: Vec::new(),
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -585,6 +605,7 @@ fn serializes_native_response_schema_without_tools() {
         }],
         tools: Vec::new(),
         output_schema: Some(schema),
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -637,6 +658,7 @@ fn serializes_any_function_calling_config_for_plan_mode_fallback() {
             output_schema: None,
         })],
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Any {
             allowed_function_names: vec![
                 "request_user_input".to_string(),
@@ -688,6 +710,7 @@ fn structured_output_never_uses_forced_any_tool_config() {
             },
             "required": ["ok"]
         })),
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Any {
             allowed_function_names: vec!["request_user_input".to_string()],
         },
@@ -755,6 +778,7 @@ fn request_value_for_function_output(output: FunctionCallOutputPayload) -> serde
         ],
         tools: vec![weather_tool()],
         output_schema: None,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };
@@ -783,6 +807,7 @@ fn request_value_with_grounding(
         }],
         tools,
         output_schema,
+        gemini_search_mode: None,
         tool_choice: GeminiToolChoice::Auto,
         thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
     };

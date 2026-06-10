@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+expression: popup
+---
+  Select Search Mode
+  Choose Gemini-native search behavior.
+
+  1. Tavily            Use client web_search/web_fetch tools.
+  2. Grounding         Use built-in google:search grounding.
+› 3. Hybrid (current)  Use both client web tools and google:search.
+  4. Off               Disable Gemini search tools.
+
+  Press enter to confirm or esc to go back

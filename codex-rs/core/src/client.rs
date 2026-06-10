@@ -78,6 +78,7 @@ use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -155,6 +156,8 @@ const GEMINI_RESEARCH_DILIGENCE_INSTRUCTIONS_MARKER: &str = "Research diligence"
 const GEMINI_RESEARCH_DILIGENCE_INSTRUCTIONS: &str = "Research diligence: for any question about current facts, latest versions, statistics, benchmarks, prices, or who holds a role, use web_search before relying on memory, and dig further with another search or web_fetch of the primary/official source when a needed detail is not found yet. Ground every specific figure or claim in what you actually retrieved; never attribute a value to the wrong source or entity, and never fill a missing data point with a different item's, version's, or time-period's value. State what each figure measures and its basis (version, methodology, date), and mark missing values as 'not reported' rather than substituting. If something is still not found after searching, say it is unavailable rather than guessing.";
 const GEMINI_OUTPUT_CONCISENESS_INSTRUCTIONS_MARKER: &str = "After creating or editing files";
 const GEMINI_OUTPUT_CONCISENESS_INSTRUCTIONS: &str = "After creating or editing files, do not reproduce the full file contents in your reply unless the user explicitly asks to see them; the diff already shows the changes. Briefly summarize what changed in one or two sentences.";
+const GEMINI_HYBRID_SEARCH_INSTRUCTIONS_MARKER: &str = "Gemini search mode: Hybrid";
+const GEMINI_HYBRID_SEARCH_INSTRUCTIONS: &str = "Gemini search mode: Hybrid. Use built-in google:search grounding for quick freshness checks; use web_search/web_fetch when you need raw results or primary-source verification. If the user asks not to search, or freshness is unnecessary, skip search.";
 const GEMINI_APPLY_PATCH_INSTRUCTIONS: &str = r#"Gemini file edits: prefer the `apply_patch` shell command over `cat >`, `python -c`, or `sed`, especially for small in-place edits. Call the visible shell tool (`exec_command` or `shell_command`) with a heredoc such as:
 
 apply_patch <<'PATCH'
@@ -1462,6 +1465,14 @@ impl ModelClientSession {
             }
             instructions.push_str(GEMINI_OUTPUT_CONCISENESS_INSTRUCTIONS);
         }
+        if prompt.gemini_search_mode == Some(GeminiSearchMode::Hybrid)
+            && !instructions.contains(GEMINI_HYBRID_SEARCH_INSTRUCTIONS_MARKER)
+        {
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(GEMINI_HYBRID_SEARCH_INSTRUCTIONS);
+        }
         let rx = codex_gemini_adapter::stream_generate_content(
             build_reqwest_client(),
             self.client.state.provider.info(),
@@ -1471,6 +1482,7 @@ impl ModelClientSession {
                 input: prompt.get_formatted_input(),
                 tools,
                 output_schema: prompt.output_schema.clone(),
+                gemini_search_mode: prompt.gemini_search_mode,
                 tool_choice: codex_gemini_adapter::GeminiToolChoice::Auto,
                 thought_summary_display: if self.client.state.show_gemini_thought_summary {
                     GeminiThoughtSummaryDisplay::Visible

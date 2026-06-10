@@ -176,6 +176,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             next_cursor: Some("cursor_next".to_string()),
             backwards_cursor: Some("cursor_back".to_string()),
         }),
+        gemini_search_mode: codex_protocol::protocol::GeminiSearchMode::Tavily,
     };
 
     let value = serde_json::to_value(&response).expect("serialize thread resume response");
@@ -3658,6 +3659,25 @@ fn thread_settings_update_params_preserve_explicit_null_service_tier() {
     let serialized_without_override =
         serde_json::to_value(&without_override).expect("params should serialize");
     assert_eq!(serialized_without_override.get("serviceTier"), None);
+}
+
+#[test]
+fn thread_settings_update_params_round_trip_gemini_search_mode() {
+    let params: ThreadSettingsUpdateParams = serde_json::from_value(json!({
+        "threadId": "thread_123",
+        "geminiSearchMode": "hybrid"
+    }))
+    .expect("params should deserialize");
+    assert_eq!(
+        params.gemini_search_mode,
+        Some(codex_protocol::protocol::GeminiSearchMode::Hybrid)
+    );
+
+    let serialized = serde_json::to_value(&params).expect("params should serialize");
+    assert_eq!(
+        serialized.get("geminiSearchMode"),
+        Some(&serde_json::Value::String("hybrid".to_string()))
+    );
 }
 
 #[test]

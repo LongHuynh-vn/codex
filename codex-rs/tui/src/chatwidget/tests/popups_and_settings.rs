@@ -2277,6 +2277,17 @@ async fn personality_selection_popup_snapshot() {
     assert_chatwidget_snapshot!("personality_selection_popup", popup);
 }
 
+#[tokio::test]
+async fn search_mode_selection_popup_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gemini-3.5-flash")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_gemini_search_mode(GeminiSearchMode::Hybrid);
+    chat.open_search_mode_popup();
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("search_mode_selection_popup", popup);
+}
+
 #[cfg(not(target_os = "linux"))]
 #[tokio::test]
 async fn realtime_audio_selection_popup_snapshot() {

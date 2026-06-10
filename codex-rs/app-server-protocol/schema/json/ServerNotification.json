@@ -1508,6 +1508,15 @@
       ],
       "type": "object"
     },
+    "GeminiSearchMode": {
+      "enum": [
+        "tavily",
+        "grounding",
+        "hybrid",
+        "off"
+      ],
+      "type": "string"
+    },
     "GitInfo": {
       "properties": {
         "branch": {
@@ -4519,6 +4528,14 @@
               "type": "null"
             }
           ]
+        },
+        "geminiSearchMode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GeminiSearchMode"
+            }
+          ],
+          "default": "tavily"
         },
         "model": {
           "type": "string"

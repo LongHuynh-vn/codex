@@ -251,6 +251,9 @@ impl ChatWidget {
             SlashCommand::Personality => {
                 self.open_personality_popup();
             }
+            SlashCommand::Search => {
+                self.open_search_mode_popup();
+            }
             SlashCommand::Plan => {
                 self.apply_plan_slash_command();
             }
@@ -989,6 +992,7 @@ impl ChatWidget {
             | SlashCommand::Realtime
             | SlashCommand::Settings
             | SlashCommand::Personality
+            | SlashCommand::Search
             | SlashCommand::Plan
             | SlashCommand::Goal
             | SlashCommand::Side

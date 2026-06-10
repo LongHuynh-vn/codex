@@ -489,6 +489,15 @@
       ],
       "type": "object"
     },
+    "GeminiSearchMode": {
+      "enum": [
+        "tavily",
+        "grounding",
+        "hybrid",
+        "off"
+      ],
+      "type": "string"
+    },
     "GitInfo": {
       "properties": {
         "branch": {
@@ -2266,6 +2275,14 @@
     },
     "cwd": {
       "$ref": "#/definitions/AbsolutePathBuf"
+    },
+    "geminiSearchMode": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/GeminiSearchMode"
+        }
+      ],
+      "default": "tavily"
     },
     "instructionSources": {
       "default": [],

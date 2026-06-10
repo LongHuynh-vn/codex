@@ -201,6 +201,23 @@ impl ChatWidget {
         self.config.personality = Some(personality);
     }
 
+    pub(crate) fn current_gemini_search_mode(&self) -> GeminiSearchMode {
+        self.current_gemini_search_mode
+    }
+
+    pub(crate) fn set_gemini_search_mode(&mut self, mode: GeminiSearchMode) {
+        self.current_gemini_search_mode = mode;
+    }
+
+    pub(crate) fn gemini_search_mode_label(mode: GeminiSearchMode) -> &'static str {
+        match mode {
+            GeminiSearchMode::Tavily => "Tavily",
+            GeminiSearchMode::Grounding => "Grounding",
+            GeminiSearchMode::Hybrid => "Hybrid",
+            GeminiSearchMode::Off => "Off",
+        }
+    }
+
     pub(crate) fn status_account_display(&self) -> Option<&StatusAccountDisplay> {
         self.status_account_display.as_ref()
     }
@@ -515,6 +532,7 @@ impl ChatWidget {
         self.set_approval_policy(settings.approval_policy);
         self.set_approvals_reviewer(settings.approvals_reviewer.to_core());
         self.config.personality = settings.personality;
+        self.current_gemini_search_mode = settings.gemini_search_mode;
 
         let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
             &settings.sandbox_policy.to_core(),

@@ -102,6 +102,7 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AdditionalContextEntry;
 use codex_protocol::protocol::FileChange;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -208,6 +209,17 @@ pub(crate) mod session;
 pub(crate) mod turn;
 pub(crate) mod turn_context;
 use self::config_lock::export_config_lock_if_configured;
+
+const CODEX_GEMINI_GROUNDING_ENV_VAR: &str = "CODEX_GEMINI_GROUNDING";
+
+pub(crate) fn gemini_search_mode_from_grounding_env_value(value: Option<&str>) -> GeminiSearchMode {
+    if value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+    {
+        GeminiSearchMode::Hybrid
+    } else {
+        GeminiSearchMode::Tavily
+    }
+}
 use self::config_lock::validate_config_lock_if_configured;
 #[cfg(test)]
 use self::handlers::submission_dispatch_span;
@@ -590,6 +602,14 @@ impl Codex {
             config.features.enabled(Feature::FastMode),
             &model_info,
         );
+        // Env-enabled Gemini grounding now starts in Hybrid mode, so it also
+        // receives the Hybrid division-of-labor nudge. The byte-identical
+        // invariant applies to the no-env default path.
+        let gemini_search_mode = gemini_search_mode_from_grounding_env_value(
+            std::env::var(CODEX_GEMINI_GROUNDING_ENV_VAR)
+                .ok()
+                .as_deref(),
+        );
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
             collaboration_mode,
@@ -598,6 +618,7 @@ impl Codex {
             developer_instructions: config.developer_instructions.clone(),
             user_instructions,
             personality: config.personality,
+            gemini_search_mode,
             base_instructions,
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),

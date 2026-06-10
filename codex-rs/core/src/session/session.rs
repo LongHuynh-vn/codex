@@ -60,6 +60,9 @@ pub(crate) struct SessionConfiguration {
     /// Personality preference for the model.
     pub(super) personality: Option<Personality>,
 
+    /// Gemini-native search mode for subsequent turns.
+    pub(super) gemini_search_mode: GeminiSearchMode,
+
     /// Base instructions for the session.
     pub(super) base_instructions: String,
 
@@ -189,6 +192,7 @@ impl SessionConfiguration {
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.model_reasoning_summary,
             personality: self.personality,
+            gemini_search_mode: self.gemini_search_mode,
             collaboration_mode: self.collaboration_mode.clone(),
             session_source: self.session_source.clone(),
             parent_thread_id: self.parent_thread_id,
@@ -243,6 +247,9 @@ impl SessionConfiguration {
         }
         if let Some(personality) = updates.personality {
             next_configuration.personality = Some(personality);
+        }
+        if let Some(gemini_search_mode) = updates.gemini_search_mode {
+            next_configuration.gemini_search_mode = gemini_search_mode;
         }
         if let Some(approval_policy) = updates.approval_policy {
             next_configuration.approval_policy.set(approval_policy)?;
@@ -436,6 +443,7 @@ pub(crate) struct SessionSettingsUpdate {
     /// disables environments for this turn.
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) personality: Option<Personality>,
+    pub(crate) gemini_search_mode: Option<GeminiSearchMode>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
 }

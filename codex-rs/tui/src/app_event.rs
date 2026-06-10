@@ -46,6 +46,7 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_realtime_webrtc::RealtimeWebrtcEvent;
 use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
 
@@ -629,6 +630,9 @@ pub(crate) enum AppEvent {
 
     /// Update the current personality in the running app and widget.
     UpdatePersonality(Personality),
+
+    /// Update the current Gemini search mode in the running app and widget.
+    UpdateSearchMode(GeminiSearchMode),
 
     /// Persist the selected model and reasoning effort to the appropriate config.
     PersistModelSelection {

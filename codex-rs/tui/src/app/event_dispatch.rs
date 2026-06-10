@@ -763,6 +763,21 @@ impl App {
                 self.sync_active_thread_personality_setting(app_server, personality)
                     .await;
             }
+            AppEvent::UpdateSearchMode(mode) => {
+                if self
+                    .sync_active_thread_search_mode_setting(app_server, mode)
+                    .await
+                {
+                    self.chat_widget.set_gemini_search_mode(mode);
+                    self.chat_widget.add_info_message(
+                        format!(
+                            "Search mode: {}",
+                            crate::chatwidget::ChatWidget::gemini_search_mode_label(mode)
+                        ),
+                        /*hint*/ None,
+                    );
+                }
+            }
             AppEvent::OpenRealtimeAudioDeviceSelection { kind } => {
                 self.chat_widget.open_realtime_audio_device_selection(kind);
             }

@@ -24,6 +24,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AdditionalContextEntry;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -68,6 +69,7 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
     pub personality: Option<Personality>,
+    pub gemini_search_mode: GeminiSearchMode,
     pub collaboration_mode: CollaborationMode,
     pub session_source: SessionSource,
     pub parent_thread_id: Option<ThreadId>,
@@ -104,6 +106,7 @@ pub struct CodexThreadSettingsOverrides {
     pub service_tier: Option<Option<String>>,
     pub collaboration_mode: Option<CollaborationMode>,
     pub personality: Option<Personality>,
+    pub gemini_search_mode: Option<GeminiSearchMode>,
 }
 
 pub struct CodexThread {
@@ -331,6 +334,7 @@ impl CodexThread {
             service_tier,
             collaboration_mode,
             personality,
+            gemini_search_mode,
         } = overrides;
         let collaboration_mode = if let Some(collaboration_mode) = collaboration_mode {
             collaboration_mode
@@ -356,6 +360,7 @@ impl CodexThread {
             reasoning_summary: summary,
             service_tier,
             personality,
+            gemini_search_mode,
             ..Default::default()
         }
     }

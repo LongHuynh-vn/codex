@@ -400,6 +400,17 @@ pub struct ConversationTextParams {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum GeminiSearchMode {
+    #[default]
+    Tavily,
+    Grounding,
+    Hybrid,
+    Off,
+}
+
 /// Persistent thread-settings overrides that can be applied before user input or
 /// on their own.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema)]
@@ -473,6 +484,10 @@ pub struct ThreadSettingsOverrides {
     /// Updated personality preference.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<Personality>,
+
+    /// Updated Gemini-native search mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_search_mode: Option<GeminiSearchMode>,
 }
 
 /// Source classification for client-supplied context.
@@ -1913,6 +1928,8 @@ pub struct ThreadSettingsSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<Personality>,
     pub collaboration_mode: CollaborationMode,
+    #[serde(default)]
+    pub gemini_search_mode: GeminiSearchMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]

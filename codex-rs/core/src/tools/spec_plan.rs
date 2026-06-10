@@ -557,6 +557,13 @@ fn add_client_web_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut P
     if turn_context.provider.info().wire_api != WireApi::GeminiNative {
         return;
     }
+    if matches!(
+        turn_context.gemini_search_mode,
+        codex_protocol::protocol::GeminiSearchMode::Grounding
+            | codex_protocol::protocol::GeminiSearchMode::Off
+    ) {
+        return;
+    }
     if turn_context.config.web_search_mode.value()
         == codex_protocol::config_types::WebSearchMode::Disabled
     {

@@ -90,6 +90,54 @@ impl ChatWidget {
         });
     }
 
+    pub(crate) fn open_search_mode_popup(&mut self) {
+        if !self.is_session_configured() {
+            self.add_info_message(
+                "Search mode selection is disabled until startup completes.".to_string(),
+                /*hint*/ None,
+            );
+            return;
+        }
+
+        let current_mode = self.current_gemini_search_mode();
+        let modes = [
+            GeminiSearchMode::Tavily,
+            GeminiSearchMode::Grounding,
+            GeminiSearchMode::Hybrid,
+            GeminiSearchMode::Off,
+        ];
+
+        let items: Vec<SelectionItem> = modes
+            .into_iter()
+            .map(|mode| {
+                let name = Self::gemini_search_mode_label(mode).to_string();
+                let description = Some(Self::gemini_search_mode_description(mode).to_string());
+                let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                    tx.send(AppEvent::UpdateSearchMode(mode));
+                })];
+                SelectionItem {
+                    name,
+                    description,
+                    is_current: current_mode == mode,
+                    actions,
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let mut header = ColumnRenderable::new();
+        header.push(Line::from("Select Search Mode".bold()));
+        header.push(Line::from("Choose Gemini-native search behavior.".dim()));
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            header: Box::new(header),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
     pub(crate) fn open_realtime_audio_popup(&mut self) {
         let items = [
             RealtimeAudioDeviceKind::Microphone,
@@ -281,6 +329,15 @@ impl ChatWidget {
             Personality::None => "No personality instructions.",
             Personality::Friendly => "Warm, collaborative, and helpful.",
             Personality::Pragmatic => "Concise, task-focused, and direct.",
+        }
+    }
+
+    fn gemini_search_mode_description(mode: GeminiSearchMode) -> &'static str {
+        match mode {
+            GeminiSearchMode::Tavily => "Use client web_search/web_fetch tools.",
+            GeminiSearchMode::Grounding => "Use built-in google:search grounding.",
+            GeminiSearchMode::Hybrid => "Use both client web tools and google:search.",
+            GeminiSearchMode::Off => "Disable Gemini search tools.",
         }
     }
 }

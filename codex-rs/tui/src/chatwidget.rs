@@ -160,6 +160,7 @@ use codex_protocol::items::AgentMessageItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::plan_tool::PlanItemArg as UpdatePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as UpdatePlanItemStatus;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_protocol::request_permissions::RequestPermissionsEvent;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
@@ -539,6 +540,7 @@ pub(crate) struct ChatWidget {
     current_collaboration_mode: CollaborationMode,
     /// The currently active collaboration mask, if any.
     active_collaboration_mask: Option<CollaborationModeMask>,
+    current_gemini_search_mode: GeminiSearchMode,
     has_chatgpt_account: bool,
     model_catalog: Arc<ModelCatalog>,
     session_telemetry: SessionTelemetry,

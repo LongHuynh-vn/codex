@@ -1187,6 +1187,7 @@ impl ThreadRequestProcessor {
             sandbox,
             active_permission_profile,
             reasoning_effort: config_snapshot.reasoning_effort,
+            gemini_search_mode: config_snapshot.gemini_search_mode,
         };
         let notif = thread_started_notification(thread);
         listener_task_context
@@ -2659,6 +2660,7 @@ impl ThreadRequestProcessor {
                     active_permission_profile,
                     reasoning_effort: session_configured.reasoning_effort,
                     initial_turns_page,
+                    gemini_search_mode: config_snapshot.gemini_search_mode,
                 };
 
                 let connection_id = request_id.connection_id;
@@ -3347,6 +3349,7 @@ impl ThreadRequestProcessor {
             sandbox,
             active_permission_profile,
             reasoning_effort: session_configured.reasoning_effort,
+            gemini_search_mode: config_snapshot.gemini_search_mode,
         };
 
         let notif = thread_started_notification(thread);

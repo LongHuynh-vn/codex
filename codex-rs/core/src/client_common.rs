@@ -3,6 +3,7 @@ use codex_config::types::Personality;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_tools::ToolSpec;
 use futures::Stream;
 use serde_json::Value;
@@ -35,6 +36,10 @@ pub struct Prompt {
 
     /// Whether the Responses API should strictly validate `output_schema`.
     pub output_schema_strict: bool,
+
+    /// Gemini-native search behavior. `None` preserves adapter-local fallback
+    /// behavior for prompts not built from a live session turn.
+    pub gemini_search_mode: Option<GeminiSearchMode>,
 }
 
 impl Default for Prompt {
@@ -47,6 +52,7 @@ impl Default for Prompt {
             personality: None,
             output_schema: None,
             output_schema_strict: true,
+            gemini_search_mode: None,
         }
     }
 }

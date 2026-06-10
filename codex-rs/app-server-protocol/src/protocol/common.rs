@@ -2419,6 +2419,7 @@ mod tests {
                 sandbox: v2::SandboxPolicy::DangerFullAccess,
                 active_permission_profile: None,
                 reasoning_effort: None,
+                gemini_search_mode: codex_protocol::protocol::GeminiSearchMode::Tavily,
             },
         };
 
@@ -2465,7 +2466,8 @@ mod tests {
                         "type": "dangerFullAccess"
                     },
                     "activePermissionProfile": null,
-                    "reasoningEffort": null
+                    "reasoningEffort": null,
+                    "geminiSearchMode": "tavily"
                 }
             }),
             serde_json::to_value(&response)?,
@@ -3223,6 +3225,7 @@ mod tests {
                         },
                     },
                     personality: None,
+                    gemini_search_mode: codex_protocol::protocol::GeminiSearchMode::Tavily,
                 },
             });
 

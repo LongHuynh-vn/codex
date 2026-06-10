@@ -16,6 +16,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_protocol::protocol::ThreadGoalStatus as CoreThreadGoalStatus;
 use codex_protocol::protocol::TokenUsage as CoreTokenUsage;
 use codex_protocol::protocol::TokenUsageInfo as CoreTokenUsageInfo;
@@ -213,6 +214,8 @@ pub struct ThreadStartResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub gemini_search_mode: GeminiSearchMode,
 }
 
 #[derive(
@@ -269,6 +272,9 @@ pub struct ThreadSettingsUpdateParams {
     /// Override the personality for subsequent turns.
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
+    /// Override the Gemini-native search mode for subsequent turns.
+    #[ts(optional = nullable)]
+    pub gemini_search_mode: Option<GeminiSearchMode>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -292,6 +298,8 @@ pub struct ThreadSettings {
     pub summary: Option<ReasoningSummary>,
     pub collaboration_mode: CollaborationMode,
     pub personality: Option<Personality>,
+    #[serde(default)]
+    pub gemini_search_mode: GeminiSearchMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -432,6 +440,8 @@ pub struct ThreadResumeResponse {
     #[experimental("thread/resume.initialTurnsPage")]
     #[serde(default)]
     pub initial_turns_page: Option<TurnsPage>,
+    #[serde(default)]
+    pub gemini_search_mode: GeminiSearchMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -577,6 +587,8 @@ pub struct ThreadForkResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub gemini_search_mode: GeminiSearchMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

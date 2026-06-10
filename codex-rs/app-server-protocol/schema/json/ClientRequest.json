@@ -1051,6 +1051,15 @@
       ],
       "type": "object"
     },
+    "GeminiSearchMode": {
+      "enum": [
+        "tavily",
+        "grounding",
+        "hybrid",
+        "off"
+      ],
+      "type": "string"
+    },
     "GetAccountParams": {
       "properties": {
         "refreshToken": {

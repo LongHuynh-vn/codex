@@ -12,7 +12,10 @@ use codex_model_provider_info::GEMINI_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::GeminiSearchMode;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use core_test_support::skip_if_no_network;
+use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
@@ -169,6 +172,29 @@ pub(super) fn gemini_text_sse(text: &str) -> String {
     })])
 }
 
+fn gemini_function_declaration_names(request: &Value) -> Vec<&str> {
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.get("functionDeclarations").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+        .collect()
+}
+
+fn gemini_request_has_google_search(request: &Value) -> bool {
+    request["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| tool.get("googleSearch").is_some()))
+}
+
+fn gemini_system_instruction(request: &Value) -> &str {
+    request["systemInstruction"]["parts"][0]["text"]
+        .as_str()
+        .expect("Gemini request systemInstruction text")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gemini_apply_patch_uses_exec_command_intercept() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -302,6 +328,78 @@ async fn gemini_apply_patch_uses_exec_command_intercept() -> Result<()> {
             .any(|part| { part["functionResponse"]["name"].as_str() == Some("exec_command") }),
         "Gemini follow-up must replay exec_command functionResponse: {follow_up_parts:?}"
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_search_modes_control_tools_grounding_and_hybrid_nudge() -> Result<()> {
+    let cases = [
+        (GeminiSearchMode::Tavily, true, false, false),
+        (GeminiSearchMode::Grounding, false, true, false),
+        (GeminiSearchMode::Hybrid, true, true, true),
+        (GeminiSearchMode::Off, false, false, false),
+    ];
+
+    for (mode, expect_client_web_tools, expect_google_search, expect_hybrid_nudge) in cases {
+        let harness = TestCodexHarness::with_builder(gemini_builder()).await?;
+        submit_thread_settings(
+            harness.test().codex.as_ref(),
+            ThreadSettingsOverrides {
+                gemini_search_mode: Some(mode),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let requests =
+            mount_gemini_sse_sequence(harness.server(), vec![gemini_text_sse("done")]).await;
+
+        harness
+            .test()
+            .submit_turn_with_permission_profile(
+                "answer with the configured Gemini search mode",
+                PermissionProfile::Disabled,
+            )
+            .await?;
+
+        let captured = requests.requests();
+        assert_eq!(captured.len(), 1);
+        let tool_names = gemini_function_declaration_names(&captured[0]);
+        assert_eq!(
+            tool_names.contains(&"web_search"),
+            expect_client_web_tools,
+            "mode {mode:?} web_search mismatch: {tool_names:?}"
+        );
+        assert_eq!(
+            tool_names.contains(&"web_fetch"),
+            expect_client_web_tools,
+            "mode {mode:?} web_fetch mismatch: {tool_names:?}"
+        );
+        assert_eq!(
+            gemini_request_has_google_search(&captured[0]),
+            expect_google_search,
+            "mode {mode:?} googleSearch mismatch: {captured:?}"
+        );
+        let instructions = gemini_system_instruction(&captured[0]);
+        assert_eq!(
+            instructions.contains("Gemini search mode: Hybrid"),
+            expect_hybrid_nudge,
+            "mode {mode:?} hybrid nudge mismatch: {instructions}"
+        );
+        assert_eq!(
+            instructions.matches("Gemini search mode: Hybrid").count(),
+            usize::from(expect_hybrid_nudge),
+            "mode {mode:?} hybrid nudge duplication mismatch: {instructions}"
+        );
+        if expect_hybrid_nudge {
+            assert!(
+                instructions.ends_with(
+                    "If the user asks not to search, or freshness is unnecessary, skip search."
+                ),
+                "Hybrid nudge should be last in Gemini instructions: {instructions}"
+            );
+        }
+    }
 
     Ok(())
 }

@@ -271,6 +271,34 @@ fn skill_message(text: &str) -> ResponseItem {
     }
 }
 
+#[test]
+fn gemini_grounding_env_seed_maps_truthy_values_to_hybrid() {
+    assert_eq!(
+        gemini_search_mode_from_grounding_env_value(None),
+        GeminiSearchMode::Tavily
+    );
+    assert_eq!(
+        gemini_search_mode_from_grounding_env_value(Some("")),
+        GeminiSearchMode::Tavily
+    );
+    assert_eq!(
+        gemini_search_mode_from_grounding_env_value(Some("0")),
+        GeminiSearchMode::Tavily
+    );
+    assert_eq!(
+        gemini_search_mode_from_grounding_env_value(Some("yes")),
+        GeminiSearchMode::Tavily
+    );
+    assert_eq!(
+        gemini_search_mode_from_grounding_env_value(Some("1")),
+        GeminiSearchMode::Hybrid
+    );
+    assert_eq!(
+        gemini_search_mode_from_grounding_env_value(Some(" TRUE ")),
+        GeminiSearchMode::Hybrid
+    );
+}
+
 #[tokio::test]
 async fn regular_turn_emits_turn_started_with_trace_id_without_waiting_for_startup_prewarm() {
     let _trace_test_context = install_test_tracing("codex-core-tests");
@@ -3163,6 +3191,7 @@ async fn set_rate_limits_retains_previous_credits() {
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()
@@ -3271,6 +3300,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()
@@ -3803,6 +3833,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()
@@ -4547,6 +4578,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()
@@ -4658,6 +4690,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()
@@ -4897,6 +4930,7 @@ async fn make_session_with_config_and_rx(
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()
@@ -5002,6 +5036,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()
@@ -6749,6 +6784,7 @@ where
         user_instructions: config.user_instructions.clone(),
         service_tier: None,
         personality: config.personality,
+        gemini_search_mode: GeminiSearchMode::Tavily,
         base_instructions: config
             .base_instructions
             .clone()

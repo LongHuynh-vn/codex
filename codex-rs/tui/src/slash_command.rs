@@ -22,6 +22,7 @@ pub enum SlashCommand {
     #[strum(serialize = "sandbox-add-read-dir")]
     SandboxReadRoot,
     Experimental,
+    Search,
     #[strum(to_string = "approve")]
     AutoReview,
     Memories,
@@ -128,6 +129,7 @@ impl SlashCommand {
                 "let sandbox read a directory: /sandbox-add-read-dir <absolute_path>"
             }
             SlashCommand::Experimental => "toggle experimental features",
+            SlashCommand::Search => "choose Gemini search mode",
             SlashCommand::AutoReview => "approve one retry of a recent auto-review denial",
             SlashCommand::Memories => "configure memory use and generation",
             SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
@@ -195,6 +197,7 @@ impl SlashCommand {
             | SlashCommand::ElevateSandbox
             | SlashCommand::SandboxReadRoot
             | SlashCommand::Experimental
+            | SlashCommand::Search
             | SlashCommand::Memories
             | SlashCommand::Review
             | SlashCommand::Plan
@@ -285,6 +288,18 @@ mod tests {
         assert!(SlashCommand::Raw.available_during_task());
         assert!(SlashCommand::Raw.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
+    }
+
+    #[test]
+    fn search_command_is_session_settings_only() {
+        assert_eq!(SlashCommand::from_str("search"), Ok(SlashCommand::Search));
+        assert_eq!(
+            SlashCommand::Search.description(),
+            "choose Gemini search mode"
+        );
+        assert!(!SlashCommand::Search.supports_inline_args());
+        assert!(!SlashCommand::Search.available_during_task());
+        assert!(!SlashCommand::Search.available_in_side_conversation());
     }
 
     #[test]

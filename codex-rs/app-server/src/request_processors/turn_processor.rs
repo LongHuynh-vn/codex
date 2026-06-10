@@ -69,6 +69,7 @@ struct ThreadSettingsBuildParams {
     summary: Option<ReasoningSummary>,
     collaboration_mode: Option<CollaborationMode>,
     personality: Option<Personality>,
+    gemini_search_mode: Option<codex_protocol::protocol::GeminiSearchMode>,
 }
 
 impl TurnRequestProcessor {
@@ -436,6 +437,7 @@ impl TurnRequestProcessor {
                     summary: params.summary,
                     collaboration_mode: params.collaboration_mode,
                     personality: params.personality,
+                    gemini_search_mode: None,
                 },
             )
             .await?;
@@ -510,6 +512,7 @@ impl TurnRequestProcessor {
             summary,
             collaboration_mode,
             personality,
+            gemini_search_mode,
         } = params;
 
         if sandbox_policy.is_some() && permissions.is_some() {
@@ -541,7 +544,8 @@ impl TurnRequestProcessor {
             || effort.is_some()
             || summary.is_some()
             || collaboration_mode.is_some()
-            || personality.is_some();
+            || personality.is_some()
+            || gemini_search_mode.is_some();
 
         let runtime_workspace_roots = if let Some(workspace_roots) =
             runtime_workspace_roots_request.clone()
@@ -634,6 +638,7 @@ impl TurnRequestProcessor {
                     service_tier: service_tier.clone(),
                     collaboration_mode: collaboration_mode.clone(),
                     personality,
+                    gemini_search_mode,
                 })
                 .await
                 .map_err(|err| {
@@ -657,6 +662,7 @@ impl TurnRequestProcessor {
             service_tier,
             collaboration_mode,
             personality,
+            gemini_search_mode,
         })
     }
 
@@ -683,6 +689,7 @@ impl TurnRequestProcessor {
                     summary: params.summary,
                     collaboration_mode: params.collaboration_mode,
                     personality: params.personality,
+                    gemini_search_mode: params.gemini_search_mode,
                 },
             )
             .await?;

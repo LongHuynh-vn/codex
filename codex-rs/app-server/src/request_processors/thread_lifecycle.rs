@@ -633,6 +633,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         cwd,
         workspace_roots,
         reasoning_effort,
+        gemini_search_mode,
         ..
     } = pending.config_snapshot;
     let instruction_sources = pending.instruction_sources;
@@ -656,6 +657,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         active_permission_profile,
         reasoning_effort,
         initial_turns_page,
+        gemini_search_mode,
     };
     outgoing.send_response(request_id, response).await;
     // Match cold resume: metadata-only resume should attach the listener without

@@ -199,6 +199,7 @@ async fn run_remote_compact_task_inner_impl(
         personality: turn_context.personality,
         output_schema: None,
         output_schema_strict: true,
+        gemini_search_mode: None,
     };
     let window_id = sess.services.model_client.current_window_id();
     let turn_metadata_header = turn_context

@@ -8,6 +8,11 @@ use pretty_assertions::assert_eq;
 use super::*;
 
 #[test]
+fn prompt_default_has_no_gemini_search_mode() {
+    assert_eq!(Prompt::default().gemini_search_mode, None);
+}
+
+#[test]
 fn serializes_text_verbosity_when_set() {
     let input: Vec<ResponseItem> = vec![];
     let tools: Vec<serde_json::Value> = vec![];
