@@ -10,6 +10,7 @@ use codex_tools::JsonSchemaType;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -77,6 +78,76 @@ fn builds_native_request_with_thinking_and_signature_replay() {
     assert_eq!(
         value["contents"][2]["parts"][0]["functionResponse"],
         json!({"name": "record_step", "response": {"output": "ok"}})
+    );
+}
+
+#[test]
+fn parses_google_search_grounding_env_toggle() {
+    assert!(!google_search_grounding_enabled_for_env_value(None));
+    assert!(!google_search_grounding_enabled_for_env_value(Some("")));
+    assert!(!google_search_grounding_enabled_for_env_value(Some("0")));
+    assert!(!google_search_grounding_enabled_for_env_value(Some("yes")));
+    assert!(google_search_grounding_enabled_for_env_value(Some("1")));
+    assert!(google_search_grounding_enabled_for_env_value(Some("true")));
+    assert!(google_search_grounding_enabled_for_env_value(Some(
+        " TRUE "
+    )));
+}
+
+#[test]
+fn google_search_grounding_disabled_omits_google_search_tool() {
+    let value =
+        request_value_with_grounding(vec![weather_tool()], None, GoogleSearchGrounding::Disabled);
+    let tools = value["tools"].as_array().expect("tools should serialize");
+
+    assert_eq!(tools.len(), 1);
+    assert!(tools[0].get("functionDeclarations").is_some());
+    assert!(tools.iter().all(|tool| tool.get("googleSearch").is_none()));
+}
+
+#[test]
+fn google_search_grounding_appends_after_function_declarations() {
+    let value =
+        request_value_with_grounding(vec![weather_tool()], None, GoogleSearchGrounding::Enabled);
+    let tools = value["tools"].as_array().expect("tools should serialize");
+
+    assert_eq!(tools.len(), 2);
+    assert_eq!(
+        tools[0]["functionDeclarations"][0]["name"],
+        json!("get_weather")
+    );
+    assert_eq!(tools[1], json!({"googleSearch": {}}));
+}
+
+#[test]
+fn google_search_grounding_does_not_emit_google_search_only_tools() {
+    let value = request_value_with_grounding(Vec::new(), None, GoogleSearchGrounding::Enabled);
+
+    assert!(value.get("tools").is_none());
+    assert!(value.get("toolConfig").is_none());
+}
+
+#[test]
+fn google_search_grounding_is_disabled_for_structured_output() {
+    let value = request_value_with_grounding(
+        vec![weather_tool()],
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"}
+            },
+            "required": ["ok"]
+        })),
+        GoogleSearchGrounding::Enabled,
+    );
+    let tools = value["tools"].as_array().expect("tools should serialize");
+
+    assert_eq!(tools.len(), 1);
+    assert!(tools[0].get("functionDeclarations").is_some());
+    assert!(tools.iter().all(|tool| tool.get("googleSearch").is_none()));
+    assert_eq!(
+        value["generationConfig"]["responseMimeType"],
+        json!("application/json")
     );
 }
 
@@ -690,5 +761,38 @@ fn request_value_for_function_output(output: FunctionCallOutputPayload) -> serde
 
     let request =
         build_generate_content_request(&prompt, &model_info, Some(ReasoningEffort::High)).unwrap();
+    serde_json::to_value(request).unwrap()
+}
+
+fn request_value_with_grounding(
+    tools: Vec<ToolSpec>,
+    output_schema: Option<Value>,
+    google_search_grounding: GoogleSearchGrounding,
+) -> serde_json::Value {
+    let mut catalog = gemini_model_catalog();
+    let model_info = catalog.models.remove(0);
+    let prompt = GeminiPrompt {
+        instructions: String::new(),
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Use available tools if needed.".to_string(),
+            }],
+            phase: None,
+        }],
+        tools,
+        output_schema,
+        tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
+    };
+
+    let request = build_generate_content_request_with_grounding(
+        &prompt,
+        &model_info,
+        Some(ReasoningEffort::Low),
+        google_search_grounding,
+    )
+    .unwrap();
     serde_json::to_value(request).unwrap()
 }

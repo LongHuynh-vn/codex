@@ -7,10 +7,26 @@ use serde_json::Value;
 use crate::schema_sanitizer::sanitize_tool_parameters;
 
 #[derive(Debug, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Tool {
-    pub(crate) function_declarations: Vec<FunctionDeclaration>,
+#[serde(untagged)]
+pub(crate) enum Tool {
+    FunctionDeclarations {
+        #[serde(rename = "functionDeclarations")]
+        function_declarations: Vec<FunctionDeclaration>,
+    },
+    GoogleSearch {
+        #[serde(rename = "googleSearch")]
+        google_search: GoogleSearch,
+    },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GoogleSearchGrounding {
+    Disabled,
+    Enabled,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub(crate) struct GoogleSearch {}
 
 #[derive(Debug, Serialize, PartialEq)]
 pub(crate) struct FunctionDeclaration {
@@ -19,7 +35,10 @@ pub(crate) struct FunctionDeclaration {
     pub(crate) parameters: Value,
 }
 
-pub(crate) fn build_tools(tools: &[ToolSpec]) -> Result<Option<Vec<Tool>>> {
+pub(crate) fn build_tools(
+    tools: &[ToolSpec],
+    google_search_grounding: GoogleSearchGrounding,
+) -> Result<Option<Vec<Tool>>> {
     let mut declarations = Vec::new();
     for tool in tools {
         match tool {
@@ -44,8 +63,14 @@ pub(crate) fn build_tools(tools: &[ToolSpec]) -> Result<Option<Vec<Tool>>> {
     if declarations.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(vec![Tool {
+        let mut tools = vec![Tool::FunctionDeclarations {
             function_declarations: declarations,
-        }]))
+        }];
+        if google_search_grounding == GoogleSearchGrounding::Enabled {
+            tools.push(Tool::GoogleSearch {
+                google_search: GoogleSearch {},
+            });
+        }
+        Ok(Some(tools))
     }
 }

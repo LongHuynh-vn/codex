@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use tracing::debug;
 
 static NEXT_RESPONSE_CALL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -42,6 +43,14 @@ struct GenerateContentResponse {
 struct Candidate {
     content: Option<Content>,
     finish_reason: Option<String>,
+    grounding_metadata: Option<GroundingMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GroundingMetadata {
+    #[serde(default)]
+    web_search_queries: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +104,14 @@ impl StreamAccumulator {
             self.usage = Some(usage.into());
         }
         for candidate in response.candidates {
+            if let Some(grounding_metadata) = candidate.grounding_metadata
+                && !grounding_metadata.web_search_queries.is_empty()
+            {
+                debug!(
+                    queries = %grounding_metadata.web_search_queries.join(", "),
+                    "Gemini grounding web search queries"
+                );
+            }
             if let Some(content) = candidate.content {
                 self.process_parts(content.parts);
             }

@@ -60,6 +60,48 @@ fn accumulates_stream_until_finish_reason_and_captures_signature_usage() {
 }
 
 #[test]
+fn parses_grounding_metadata_shape_without_changing_stream_output() {
+    let mut accumulator = StreamAccumulator::default();
+
+    accumulator
+        .process_event_data(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"grounded answer"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["query one","query two"],"searchEntryPoint":{"renderedContent":"<style>.x{}</style><div>search</div>"},"retrievalMetadata":{}}}]}"#,
+        )
+        .unwrap();
+
+    let events = accumulator.finish().unwrap();
+    assert_eq!(message_text_from_events(&events), "grounded answer");
+}
+
+#[test]
+fn grounding_metadata_is_optional() {
+    let mut accumulator = StreamAccumulator::default();
+
+    accumulator
+        .process_event_data(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"plain answer"}]},"finishReason":"STOP"}]}"#,
+        )
+        .unwrap();
+
+    let events = accumulator.finish().unwrap();
+    assert_eq!(message_text_from_events(&events), "plain answer");
+}
+
+#[test]
+fn ignores_unknown_grounding_metadata_fields() {
+    let mut accumulator = StreamAccumulator::default();
+
+    accumulator
+        .process_event_data(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"future answer"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["query"],"groundingChunks":[{"web":{"uri":"https://example.com"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":6}}],"futureField":{"nested":true}}}]}"#,
+        )
+        .unwrap();
+
+    let events = accumulator.finish().unwrap();
+    assert_eq!(message_text_from_events(&events), "future answer");
+}
+
+#[test]
 fn retains_thought_text_in_reasoning_item_by_default() {
     let mut accumulator = StreamAccumulator::default();
 
@@ -198,4 +240,14 @@ fn standalone_thought_part_signature_is_preserved_with_summary() {
     );
     assert_eq!(content, &None);
     assert_eq!(encrypted_content.as_deref(), Some("sig-standalone"));
+}
+
+fn message_text_from_events(events: &[ResponseEvent]) -> &str {
+    let ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) = &events[0] else {
+        panic!("expected message event");
+    };
+    match content.as_slice() {
+        [ContentItem::OutputText { text }] => text.as_str(),
+        _ => panic!("expected one output text item"),
+    }
 }

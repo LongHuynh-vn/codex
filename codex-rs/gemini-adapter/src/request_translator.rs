@@ -16,8 +16,10 @@ use crate::GeminiToolChoice;
 use crate::schema_sanitizer;
 use crate::signature_store::SignatureStore;
 use crate::tool_translator;
+use crate::tool_translator::GoogleSearchGrounding;
 use crate::tool_translator::Tool;
 
+const CODEX_GEMINI_GROUNDING_ENV_VAR: &str = "CODEX_GEMINI_GROUNDING";
 const GEMINI_MAX_OUTPUT_TOKENS: i64 = 64_000;
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -115,6 +117,31 @@ pub(crate) fn build_generate_content_request(
     model_info: &ModelInfo,
     effort: Option<ReasoningEffort>,
 ) -> Result<GenerateContentRequest> {
+    let env_value = std::env::var(CODEX_GEMINI_GROUNDING_ENV_VAR).ok();
+    let google_search_grounding =
+        if google_search_grounding_enabled_for_env_value(env_value.as_deref()) {
+            GoogleSearchGrounding::Enabled
+        } else {
+            GoogleSearchGrounding::Disabled
+        };
+    build_generate_content_request_with_grounding(
+        prompt,
+        model_info,
+        effort,
+        google_search_grounding,
+    )
+}
+
+fn google_search_grounding_enabled_for_env_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+}
+
+fn build_generate_content_request_with_grounding(
+    prompt: &GeminiPrompt,
+    model_info: &ModelInfo,
+    effort: Option<ReasoningEffort>,
+    google_search_grounding: GoogleSearchGrounding,
+) -> Result<GenerateContentRequest> {
     let mut store = SignatureStore::default();
     for item in &prompt.input {
         if let ResponseItem::FunctionCall {
@@ -128,7 +155,14 @@ pub(crate) fn build_generate_content_request(
         }
     }
 
-    let tools = tool_translator::build_tools(&prompt.tools)?;
+    let google_search_grounding = if prompt.output_schema.is_none()
+        && google_search_grounding == GoogleSearchGrounding::Enabled
+    {
+        GoogleSearchGrounding::Enabled
+    } else {
+        GoogleSearchGrounding::Disabled
+    };
+    let tools = tool_translator::build_tools(&prompt.tools, google_search_grounding)?;
     let tool_config = tools.as_ref().map(|_| {
         let (mode, allowed_function_names) = match &prompt.tool_choice {
             GeminiToolChoice::Any {
