@@ -211,9 +211,33 @@ pub(crate) mod turn_context;
 use self::config_lock::export_config_lock_if_configured;
 
 const CODEX_GEMINI_GROUNDING_ENV_VAR: &str = "CODEX_GEMINI_GROUNDING";
+const CODEX_GEMINI_SEARCH_MODE_ENV_VAR: &str = "CODEX_GEMINI_SEARCH_MODE";
 
-pub(crate) fn gemini_search_mode_from_grounding_env_value(value: Option<&str>) -> GeminiSearchMode {
-    if value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+/// Resolves the env-seeded initial Gemini search mode.
+///
+/// `CODEX_GEMINI_SEARCH_MODE` (tavily|grounding|hybrid|off; trimmed,
+/// case-insensitive) wins when it parses. An invalid value logs a warning and
+/// falls through to the legacy `CODEX_GEMINI_GROUNDING` mapping, where `1` or
+/// `true` means Hybrid. With neither set, the default stays Tavily.
+pub(crate) fn gemini_search_mode_from_env_values(
+    search_mode_value: Option<&str>,
+    grounding_value: Option<&str>,
+) -> GeminiSearchMode {
+    if let Some(search_mode_value) = search_mode_value {
+        match search_mode_value.trim().to_ascii_lowercase().as_str() {
+            "tavily" => return GeminiSearchMode::Tavily,
+            "grounding" => return GeminiSearchMode::Grounding,
+            "hybrid" => return GeminiSearchMode::Hybrid,
+            "off" => return GeminiSearchMode::Off,
+            // An empty value behaves as unset.
+            "" => {}
+            _ => warn!(
+                "ignoring invalid {CODEX_GEMINI_SEARCH_MODE_ENV_VAR} value `{search_mode_value}`; expected tavily|grounding|hybrid|off"
+            ),
+        }
+    }
+    if grounding_value
+        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
     {
         GeminiSearchMode::Hybrid
     } else {
@@ -602,10 +626,15 @@ impl Codex {
             config.features.enabled(Feature::FastMode),
             &model_info,
         );
-        // Env-enabled Gemini grounding now starts in Hybrid mode, so it also
-        // receives the Hybrid division-of-labor nudge. The byte-identical
-        // invariant applies to the no-env default path.
-        let gemini_search_mode = gemini_search_mode_from_grounding_env_value(
+        // CODEX_GEMINI_SEARCH_MODE seeds the initial Gemini search mode and
+        // wins over the legacy CODEX_GEMINI_GROUNDING toggle, whose truthy
+        // values still map to Hybrid (and thus receive the Hybrid
+        // division-of-labor nudge). The byte-identical invariant applies to
+        // the no-env default path.
+        let gemini_search_mode = gemini_search_mode_from_env_values(
+            std::env::var(CODEX_GEMINI_SEARCH_MODE_ENV_VAR)
+                .ok()
+                .as_deref(),
             std::env::var(CODEX_GEMINI_GROUNDING_ENV_VAR)
                 .ok()
                 .as_deref(),

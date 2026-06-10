@@ -274,27 +274,72 @@ fn skill_message(text: &str) -> ResponseItem {
 #[test]
 fn gemini_grounding_env_seed_maps_truthy_values_to_hybrid() {
     assert_eq!(
-        gemini_search_mode_from_grounding_env_value(None),
+        gemini_search_mode_from_env_values(
+            /*search_mode_value*/ None, /*grounding_value*/ None
+        ),
         GeminiSearchMode::Tavily
     );
     assert_eq!(
-        gemini_search_mode_from_grounding_env_value(Some("")),
+        gemini_search_mode_from_env_values(/*search_mode_value*/ None, Some("")),
         GeminiSearchMode::Tavily
     );
     assert_eq!(
-        gemini_search_mode_from_grounding_env_value(Some("0")),
+        gemini_search_mode_from_env_values(/*search_mode_value*/ None, Some("0")),
         GeminiSearchMode::Tavily
     );
     assert_eq!(
-        gemini_search_mode_from_grounding_env_value(Some("yes")),
+        gemini_search_mode_from_env_values(/*search_mode_value*/ None, Some("yes")),
         GeminiSearchMode::Tavily
     );
     assert_eq!(
-        gemini_search_mode_from_grounding_env_value(Some("1")),
+        gemini_search_mode_from_env_values(/*search_mode_value*/ None, Some("1")),
         GeminiSearchMode::Hybrid
     );
     assert_eq!(
-        gemini_search_mode_from_grounding_env_value(Some(" TRUE ")),
+        gemini_search_mode_from_env_values(/*search_mode_value*/ None, Some(" TRUE ")),
+        GeminiSearchMode::Hybrid
+    );
+}
+
+#[test]
+fn gemini_search_mode_env_seed_parses_values_and_wins_over_grounding() {
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some("tavily"), /*grounding_value*/ None),
+        GeminiSearchMode::Tavily
+    );
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some("grounding"), /*grounding_value*/ None),
+        GeminiSearchMode::Grounding
+    );
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some(" Hybrid "), /*grounding_value*/ None),
+        GeminiSearchMode::Hybrid
+    );
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some("OFF"), /*grounding_value*/ None),
+        GeminiSearchMode::Off
+    );
+    // The new var wins over the legacy grounding toggle.
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some("tavily"), Some("1")),
+        GeminiSearchMode::Tavily
+    );
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some("off"), Some("true")),
+        GeminiSearchMode::Off
+    );
+    // Invalid values fall through to the legacy mapping.
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some("bogus"), /*grounding_value*/ None),
+        GeminiSearchMode::Tavily
+    );
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some("bogus"), Some("1")),
+        GeminiSearchMode::Hybrid
+    );
+    // An empty value behaves as unset.
+    assert_eq!(
+        gemini_search_mode_from_env_values(Some(" "), Some("1")),
         GeminiSearchMode::Hybrid
     );
 }

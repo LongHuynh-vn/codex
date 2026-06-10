@@ -11,6 +11,7 @@ use codex_protocol::protocol::GeminiSearchMode;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use tracing::debug;
 
 use crate::GeminiPrompt;
 use crate::GeminiToolChoice;
@@ -134,6 +135,12 @@ fn google_search_grounding_for_mode(mode: Option<GeminiSearchMode>) -> GoogleSea
         }
         Some(GeminiSearchMode::Tavily | GeminiSearchMode::Off) => GoogleSearchGrounding::Disabled,
         None => {
+            // Legacy CODEX_GEMINI_GROUNDING fallback for prompts that were
+            // not built from a live session turn. Today that is only local
+            // compaction, whose empty tool list means `build_tools` cannot
+            // attach googleSearch regardless of this value. The newer
+            // CODEX_GEMINI_SEARCH_MODE env var is intentionally handled only
+            // at the codex-core session seed.
             let env_value = std::env::var(CODEX_GEMINI_GROUNDING_ENV_VAR).ok();
             if google_search_grounding_enabled_for_env_value(env_value.as_deref()) {
                 GoogleSearchGrounding::Enabled
@@ -175,6 +182,32 @@ fn build_generate_content_request_with_grounding(
         GoogleSearchGrounding::Disabled
     };
     let tools = tool_translator::build_tools(&prompt.tools, google_search_grounding)?;
+    let function_tool_names = tools
+        .iter()
+        .flatten()
+        .filter_map(|tool| match tool {
+            Tool::FunctionDeclarations {
+                function_declarations,
+            } => Some(
+                function_declarations
+                    .iter()
+                    .map(|declaration| declaration.name.as_str()),
+            ),
+            Tool::GoogleSearch { .. } => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(",");
+    let google_search_attached = tools
+        .iter()
+        .flatten()
+        .any(|tool| matches!(tool, Tool::GoogleSearch { .. }));
+    debug!(
+        function_tools = %function_tool_names,
+        google_search = google_search_attached,
+        gemini_search_mode = ?prompt.gemini_search_mode,
+        "Gemini declared tools"
+    );
     let tool_config = tools.as_ref().map(|_| {
         let (mode, allowed_function_names) = match &prompt.tool_choice {
             GeminiToolChoice::Any {

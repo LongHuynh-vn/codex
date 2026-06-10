@@ -60,6 +60,27 @@ fn accumulates_stream_until_finish_reason_and_captures_signature_usage() {
 }
 
 #[test]
+fn max_tokens_finish_reason_still_finishes_and_emits_accumulated_text() {
+    let mut accumulator = StreamAccumulator::default();
+
+    accumulator
+        .process_event_data(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"truncated answer"}]}}]}"#,
+        )
+        .unwrap();
+    assert!(!accumulator.is_finished());
+    accumulator
+        .process_event_data(r#"{"candidates":[{"finishReason":"MAX_TOKENS"}]}"#)
+        .unwrap();
+    assert!(accumulator.is_finished());
+
+    let events = accumulator.finish().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(message_text_from_events(&events), "truncated answer");
+    assert!(matches!(events[1], ResponseEvent::Completed { .. }));
+}
+
+#[test]
 fn parses_grounding_metadata_shape_without_changing_stream_output() {
     let mut accumulator = StreamAccumulator::default();
 

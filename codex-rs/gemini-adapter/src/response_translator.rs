@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tracing::debug;
+use tracing::warn;
 
 static NEXT_RESPONSE_CALL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -115,8 +116,12 @@ impl StreamAccumulator {
             if let Some(content) = candidate.content {
                 self.process_parts(content.parts);
             }
-            if candidate.finish_reason.is_some() {
+            if let Some(finish_reason) = candidate.finish_reason {
                 self.finished = true;
+                debug!(finish_reason = %finish_reason, "Gemini finish reason");
+                if finish_reason != "STOP" {
+                    warn!(finish_reason = %finish_reason, "Gemini finish reason");
+                }
             }
         }
         Ok(Vec::new())
