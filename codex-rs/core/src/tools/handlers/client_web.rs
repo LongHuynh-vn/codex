@@ -192,10 +192,11 @@ impl ToolExecutor<ToolInvocation> for ClientWebSearchHandler {
             name: WEB_SEARCH_TOOL_NAME.to_string(),
             description: concat!(
                 "Search the web through Codex's client-side Tavily backend. ",
-                "For latest, newest, or current questions, set time_range to \"month\" or ",
-                "\"year\" to avoid stale results. Prefer include_domains for primary or ",
-                "official sources. Use exact_match for precise version strings, model ",
-                "names, benchmark names, or quoted phrases."
+                "Returns result snippets and URLs; to read or verify a specific page, ",
+                "call web_fetch on its URL. For latest, newest, or current questions, ",
+                "set time_range to \"month\" or \"year\" to avoid stale results. Use ",
+                "exact_match for precise version strings, model names, benchmark names, ",
+                "or quoted phrases."
             )
             .to_string(),
             strict: false,
@@ -415,8 +416,14 @@ impl ToolExecutor<ToolInvocation> for ClientWebFetchHandler {
     fn spec(&self) -> ToolSpec {
         ToolSpec::Function(ResponsesApiTool {
             name: WEB_FETCH_TOOL_NAME.to_string(),
-            description: "Fetch a web page or document through Codex's client-side HTTP backend."
-                .to_string(),
+            description: concat!(
+                "Fetch and read a web page or document through Codex's client-side HTTP ",
+                "backend. Use web_fetch whenever the user provides or names a specific ",
+                "URL, and to read or verify any primary or official source found via ",
+                "web_search — search snippets are not a substitute for reading the page. ",
+                "You must fetch a page before claiming to have read or verified it."
+            )
+            .to_string(),
             strict: false,
             defer_loading: None,
             parameters: JsonSchema::object(

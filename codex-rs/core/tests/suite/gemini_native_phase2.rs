@@ -463,6 +463,17 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
         tool_names.contains(&"web_fetch"),
         "Gemini request must expose client-side web_fetch: {tool_names:?}"
     );
+    let web_fetch_description = captured[0]["tools"][0]["functionDeclarations"]
+        .as_array()
+        .expect("function declarations")
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("web_fetch"))
+        .and_then(|tool| tool.get("description").and_then(Value::as_str))
+        .expect("web_fetch declaration description");
+    assert!(
+        web_fetch_description.contains("web_search"),
+        "web_fetch description must delegate from web_search: {web_fetch_description}"
+    );
     let instructions = captured[0]["systemInstruction"]["parts"][0]["text"]
         .as_str()
         .expect("Gemini request systemInstruction text");

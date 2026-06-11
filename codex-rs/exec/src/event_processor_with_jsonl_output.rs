@@ -302,13 +302,7 @@ impl EventProcessorWithJsonOutput {
                 details: ThreadItemDetails::WebSearch(WebSearchItem {
                     id: raw_id,
                     query,
-                    action: match action {
-                        Some(action) => serde_json::from_value(
-                            serde_json::to_value(action).unwrap_or_else(|_| json!("other")),
-                        )
-                        .unwrap_or(WebSearchAction::Other),
-                        None => WebSearchAction::Other,
-                    },
+                    action: action.map_or(WebSearchAction::Other, Into::into),
                 }),
             }),
             _ => None,

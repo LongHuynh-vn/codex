@@ -398,6 +398,92 @@ fn web_search_completion_preserves_query_and_action() {
 }
 
 #[test]
+fn web_search_completion_maps_open_page_action() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            item: ThreadItem::WebSearch {
+                id: "search-1".to_string(),
+                query: "https://example.com".to_string(),
+                action: Some(ApiWebSearchAction::OpenPage {
+                    url: Some("https://example.com".to_string()),
+                }),
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+        },
+    ));
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ItemCompleted(ItemCompletedEvent {
+                item: ExecThreadItem {
+                    id: "item_0".to_string(),
+                    details: ThreadItemDetails::WebSearch(WebSearchItem {
+                        id: "search-1".to_string(),
+                        query: "https://example.com".to_string(),
+                        action: WebSearchAction::OpenPage {
+                            url: Some("https://example.com".to_string()),
+                        },
+                    }),
+                },
+            })],
+            status: CodexStatus::Running,
+        }
+    );
+
+    let serialized = serde_json::to_value(&collected.events[0]).expect("serialize event");
+    assert_eq!(
+        serialized["item"]["action"],
+        json!({ "type": "open_page", "url": "https://example.com" })
+    );
+}
+
+#[test]
+fn web_search_completion_maps_find_in_page_action() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            item: ThreadItem::WebSearch {
+                id: "search-1".to_string(),
+                query: "tokio".to_string(),
+                action: Some(ApiWebSearchAction::FindInPage {
+                    url: Some("https://example.com".to_string()),
+                    pattern: Some("tokio".to_string()),
+                }),
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+        },
+    ));
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ItemCompleted(ItemCompletedEvent {
+                item: ExecThreadItem {
+                    id: "item_0".to_string(),
+                    details: ThreadItemDetails::WebSearch(WebSearchItem {
+                        id: "search-1".to_string(),
+                        query: "tokio".to_string(),
+                        action: WebSearchAction::FindInPage {
+                            url: Some("https://example.com".to_string()),
+                            pattern: Some("tokio".to_string()),
+                        },
+                    }),
+                },
+            })],
+            status: CodexStatus::Running,
+        }
+    );
+}
+
+#[test]
 fn web_search_start_and_completion_reuse_item_id() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
 

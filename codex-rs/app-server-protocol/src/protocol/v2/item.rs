@@ -775,6 +775,23 @@ impl From<codex_protocol::models::WebSearchAction> for WebSearchAction {
     }
 }
 
+impl From<WebSearchAction> for codex_protocol::models::WebSearchAction {
+    fn from(value: WebSearchAction) -> Self {
+        match value {
+            WebSearchAction::Search { query, queries } => {
+                codex_protocol::models::WebSearchAction::Search { query, queries }
+            }
+            WebSearchAction::OpenPage { url } => {
+                codex_protocol::models::WebSearchAction::OpenPage { url }
+            }
+            WebSearchAction::FindInPage { url, pattern } => {
+                codex_protocol::models::WebSearchAction::FindInPage { url, pattern }
+            }
+            WebSearchAction::Other => codex_protocol::models::WebSearchAction::Other,
+        }
+    }
+}
+
 impl From<CoreTurnItem> for ThreadItem {
     fn from(value: CoreTurnItem) -> Self {
         match value {
