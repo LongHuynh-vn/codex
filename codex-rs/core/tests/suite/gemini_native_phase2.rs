@@ -481,6 +481,11 @@ async fn gemini_web_tools_execute_client_side_function_calls() -> Result<()> {
             && instructions.contains("unavailable rather than guessing"),
         "Gemini systemInstruction must include research grounding guidance: {instructions}"
     );
+    assert!(
+        instructions.contains("call that exact tool")
+            && instructions.contains("actually called web_fetch"),
+        "Gemini systemInstruction must include tool compliance and honesty guidance: {instructions}"
+    );
 
     let function_responses = captured[1]["contents"]
         .as_array()
