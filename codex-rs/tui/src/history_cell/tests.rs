@@ -35,11 +35,13 @@ use rmcp::model::Content;
 const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 async fn test_config() -> Config {
     let codex_home = std::env::temp_dir();
-    ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.clone())
         .build()
         .await
-        .expect("config")
+        .expect("config");
+    crate::test_support::pin_default_test_provider(&mut config);
+    config
 }
 
 fn test_cwd() -> PathBuf {

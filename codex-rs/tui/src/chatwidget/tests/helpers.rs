@@ -20,6 +20,7 @@ pub(super) async fn test_config() -> Config {
     config.config_layer_stack = ConfigLayerStack::default();
     config.startup_warnings.clear();
     config.user_instructions = None;
+    crate::test_support::pin_default_test_provider(&mut config);
     config
 }
 

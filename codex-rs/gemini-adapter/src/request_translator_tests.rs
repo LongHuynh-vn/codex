@@ -3,6 +3,7 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol::GeminiSearchMode;
 use codex_tools::AdditionalProperties;
 use codex_tools::JsonSchema;
@@ -820,4 +821,61 @@ fn request_value_with_grounding(
     )
     .unwrap();
     serde_json::to_value(request).unwrap()
+}
+
+#[test]
+fn skips_web_search_call_when_translating_history() {
+    let store = SignatureStore::default();
+    let items = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "what's the weather?".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "It is sunny.".to_string(),
+            }],
+            phase: None,
+        },
+        // Display-only grounding artifact persisted from a prior turn.
+        ResponseItem::WebSearchCall {
+            id: None,
+            status: Some("completed".to_string()),
+            action: Some(WebSearchAction::Search {
+                query: None,
+                queries: Some(vec!["weather".to_string()]),
+            }),
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "and tomorrow?".to_string(),
+            }],
+            phase: None,
+        },
+    ];
+
+    let contents = contents_from_response_items(&items, &store)
+        .expect("WebSearchCall must be skipped, not error");
+
+    // The WebSearchCall contributes no Content; only the three messages survive, in order.
+    assert_eq!(contents.len(), 3);
+    let roles: Vec<&str> = contents
+        .iter()
+        .map(|content| content.role.as_str())
+        .collect();
+    assert_eq!(roles, vec!["user", "model", "user"]);
+    assert_eq!(
+        contents[0].parts[0].text.as_deref(),
+        Some("what's the weather?")
+    );
+    assert_eq!(contents[1].parts[0].text.as_deref(), Some("It is sunny."));
+    assert_eq!(contents[2].parts[0].text.as_deref(), Some("and tomorrow?"));
 }

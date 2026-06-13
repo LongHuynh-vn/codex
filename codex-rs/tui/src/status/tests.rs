@@ -130,6 +130,7 @@ async fn test_config(temp_home: &TempDir) -> Config {
             /*network_enabled*/ true,
         ))
         .expect("set permission profile");
+    crate::test_support::pin_default_test_provider(&mut config);
     config
 }
 

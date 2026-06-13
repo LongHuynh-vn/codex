@@ -2,6 +2,7 @@ use codex_api::ResponseEvent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::WebSearchAction;
 use pretty_assertions::assert_eq;
 
 use super::*;
@@ -81,7 +82,7 @@ fn max_tokens_finish_reason_still_finishes_and_emits_accumulated_text() {
 }
 
 #[test]
-fn parses_grounding_metadata_shape_without_changing_stream_output() {
+fn surfaces_grounding_metadata_as_web_search_call() {
     let mut accumulator = StreamAccumulator::default();
 
     accumulator
@@ -92,6 +93,62 @@ fn parses_grounding_metadata_shape_without_changing_stream_output() {
 
     let events = accumulator.finish().unwrap();
     assert_eq!(message_text_from_events(&events), "grounded answer");
+
+    // The WebSearchCall is emitted before the Message so the cell renders above the answer.
+    let web_search_index = event_index(&events, is_web_search_call);
+    let message_index = event_index(&events, is_message);
+    assert!(web_search_index < message_index);
+
+    let ResponseEvent::OutputItemDone(ResponseItem::WebSearchCall { id, status, action }) =
+        &events[web_search_index]
+    else {
+        unreachable!("indexed a web search call");
+    };
+    assert_eq!(id, &None);
+    assert_eq!(status.as_deref(), Some("completed"));
+    assert_eq!(
+        action,
+        &Some(WebSearchAction::Search {
+            query: None,
+            queries: Some(vec!["query one".to_string(), "query two".to_string()]),
+        })
+    );
+}
+
+#[test]
+fn dedupes_grounding_queries_across_chunks() {
+    let mut accumulator = StreamAccumulator::default();
+
+    // Queries repeat across chunks and a new one appears in the final chunk.
+    accumulator
+        .process_event_data(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"groundingMetadata":{"webSearchQueries":["alpha","beta"]}}]}"#,
+        )
+        .unwrap();
+    accumulator
+        .process_event_data(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":" answer"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["alpha","beta","gamma"]}}]}"#,
+        )
+        .unwrap();
+
+    let events = accumulator.finish().unwrap();
+    assert_eq!(message_text_from_events(&events), "partial answer");
+
+    // Exactly one WebSearchCall, before the Message, with the deduped first-seen order.
+    let web_search_count = events
+        .iter()
+        .filter(|event| is_web_search_call(event))
+        .count();
+    assert_eq!(web_search_count, 1);
+    assert!(event_index(&events, is_web_search_call) < event_index(&events, is_message));
+    assert_eq!(
+        web_search_queries_from_events(&events),
+        Some(vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string()
+        ])
+    );
 }
 
 #[test]
@@ -106,6 +163,10 @@ fn grounding_metadata_is_optional() {
 
     let events = accumulator.finish().unwrap();
     assert_eq!(message_text_from_events(&events), "plain answer");
+    assert!(
+        !events.iter().any(is_web_search_call),
+        "no grounding metadata must not emit a web search call"
+    );
 }
 
 #[test]
@@ -120,6 +181,11 @@ fn ignores_unknown_grounding_metadata_fields() {
 
     let events = accumulator.finish().unwrap();
     assert_eq!(message_text_from_events(&events), "future answer");
+    // Unknown grounding fields are ignored, but webSearchQueries still surfaces.
+    assert_eq!(
+        web_search_queries_from_events(&events),
+        Some(vec!["query".to_string()])
+    );
 }
 
 #[test]
@@ -264,11 +330,51 @@ fn standalone_thought_part_signature_is_preserved_with_summary() {
 }
 
 fn message_text_from_events(events: &[ResponseEvent]) -> &str {
-    let ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) = &events[0] else {
-        panic!("expected message event");
-    };
+    // Scan for the Message item rather than indexing events[0]: a grounding
+    // WebSearchCall may now precede it in the event stream.
+    let content = events
+        .iter()
+        .find_map(|event| match event {
+            ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) => Some(content),
+            _ => None,
+        })
+        .expect("expected message event");
     match content.as_slice() {
         [ContentItem::OutputText { text }] => text.as_str(),
         _ => panic!("expected one output text item"),
     }
+}
+
+fn web_search_queries_from_events(events: &[ResponseEvent]) -> Option<Vec<String>> {
+    events.iter().find_map(|event| match event {
+        ResponseEvent::OutputItemDone(ResponseItem::WebSearchCall {
+            action: Some(WebSearchAction::Search { queries, .. }),
+            ..
+        }) => queries.clone(),
+        _ => None,
+    })
+}
+
+fn event_index<F>(events: &[ResponseEvent], predicate: F) -> usize
+where
+    F: Fn(&ResponseEvent) -> bool,
+{
+    events
+        .iter()
+        .position(predicate)
+        .expect("expected matching event")
+}
+
+fn is_web_search_call(event: &ResponseEvent) -> bool {
+    matches!(
+        event,
+        ResponseEvent::OutputItemDone(ResponseItem::WebSearchCall { .. })
+    )
+}
+
+fn is_message(event: &ResponseEvent) -> bool {
+    matches!(
+        event,
+        ResponseEvent::OutputItemDone(ResponseItem::Message { .. })
+    )
 }

@@ -318,6 +318,13 @@ fn contents_from_response_items(
             } => {
                 index += 1;
             }
+            ResponseItem::WebSearchCall { .. } => {
+                // Display-only artifact of Gemini's server-side grounding. There is no
+                // Gemini wire representation to send back, and the assistant answer (a
+                // separate Message item) already carries the content, so skip it like an
+                // unsigned Reasoning item.
+                index += 1;
+            }
             ResponseItem::FunctionCall { .. } => {
                 let mut call_ids = Vec::new();
                 let mut call_parts = Vec::new();
@@ -411,7 +418,6 @@ fn contents_from_response_items(
             | ResponseItem::ToolSearchOutput { .. }
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::CustomToolCallOutput { .. }
-            | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger

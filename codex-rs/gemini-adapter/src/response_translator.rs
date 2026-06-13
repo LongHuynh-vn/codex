@@ -3,6 +3,7 @@ use codex_protocol::error::Result;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol::TokenUsage;
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,6 +20,7 @@ pub(crate) struct StreamAccumulator {
     thought_text: String,
     standalone_thought_signature: Option<String>,
     calls: Vec<PendingFunctionCall>,
+    web_search_queries: Vec<String>,
     usage: Option<TokenUsage>,
     finished: bool,
     emitted: bool,
@@ -93,6 +95,7 @@ impl StreamAccumulator {
             thought_text: String::new(),
             standalone_thought_signature: None,
             calls: Vec::new(),
+            web_search_queries: Vec::new(),
             usage: None,
             finished: false,
             emitted: false,
@@ -105,13 +108,16 @@ impl StreamAccumulator {
             self.usage = Some(usage.into());
         }
         for candidate in response.candidates {
-            if let Some(grounding_metadata) = candidate.grounding_metadata
-                && !grounding_metadata.web_search_queries.is_empty()
-            {
-                debug!(
-                    queries = %grounding_metadata.web_search_queries.join(", "),
-                    "Gemini grounding web search queries"
-                );
+            if let Some(grounding_metadata) = candidate.grounding_metadata {
+                // Grounding queries can repeat across streamed chunks and across
+                // candidates; dedupe by exact match, preserving first-seen order, and
+                // log only newly-seen queries so the same string is not logged twice.
+                for query in grounding_metadata.web_search_queries {
+                    if !self.web_search_queries.iter().any(|seen| *seen == query) {
+                        debug!(query = %query, "Gemini grounding web search query");
+                        self.web_search_queries.push(query);
+                    }
+                }
             }
             if let Some(content) = candidate.content {
                 self.process_parts(content.parts);
@@ -176,6 +182,21 @@ impl StreamAccumulator {
         let mut events = Vec::new();
         if let Some(reasoning_item) = self.reasoning_item() {
             events.push(ResponseEvent::OutputItemDone(reasoning_item));
+        }
+        if !self.web_search_queries.is_empty() {
+            // Surface Google Search grounding as the same WebSearchCall history cell the
+            // Responses path renders ("Searched the web for ..."). Emitted before the
+            // Message so the cell appears above the answer. `id: None` is sufficient:
+            // the started/completed turn items derive from this single item, so the TUI
+            // matches the active cell by the (identical) call_id regardless of value.
+            events.push(ResponseEvent::OutputItemDone(ResponseItem::WebSearchCall {
+                id: None,
+                status: Some("completed".to_string()),
+                action: Some(WebSearchAction::Search {
+                    query: None,
+                    queries: Some(self.web_search_queries.clone()),
+                }),
+            }));
         }
         if !self.text.is_empty() {
             events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {

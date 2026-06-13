@@ -193,12 +193,14 @@ mod tests {
     use tempfile::TempDir;
 
     async fn test_config(codex_home: &TempDir, cwd: &TempDir) -> Config {
-        ConfigBuilder::default()
+        let mut config = ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
             .fallback_cwd(Some(cwd.path().to_path_buf()))
             .build()
             .await
-            .expect("load config")
+            .expect("load config");
+        crate::test_support::pin_default_test_provider(&mut config);
+        config
     }
 
     #[test]
