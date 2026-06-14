@@ -65,6 +65,7 @@ use codex_login::default_client::originator;
 use codex_mcp::McpConnectionManager;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::codex_apps_tools_cache_key;
+use codex_model_provider_info::WireApi;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_network_proxy::NetworkProxy;
@@ -1790,12 +1791,16 @@ impl Session {
             .rollout_thread_trace
             .is_enabled()
             .then(|| message.clone());
+        // On Gemini, wake an idle parent so it collects and synthesizes child
+        // completions without a user follow-up. Other wire APIs keep the prior
+        // queue-only behavior (the parent stays idle until its next turn).
+        let trigger_turn = turn_context.provider.info().wire_api == WireApi::GeminiNative;
         let communication = InterAgentCommunication::new(
             child_agent_path.clone(),
             parent_agent_path,
             Vec::new(),
             message,
-            /*trigger_turn*/ false,
+            trigger_turn,
         );
         if let Err(err) = self
             .services

@@ -2127,8 +2127,7 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
                     Op::InterAgentCommunication { communication }
                         if communication.author.as_str() == "/root/worker"
                             && communication.recipient == AgentPath::root()
-                            && communication.other_recipients.is_empty()
-                            && !communication.trigger_turn =>
+                            && communication.other_recipients.is_empty() =>
                     {
                         Some(communication.content)
                     }

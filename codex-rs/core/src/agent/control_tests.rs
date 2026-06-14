@@ -12,6 +12,11 @@ use crate::init_state_db;
 use assert_matches::assert_matches;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_model_provider_info::GEMINI_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::WireApi;
+use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
@@ -109,6 +114,36 @@ impl AgentControlHarness {
         let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
             CodexAuth::from_api_key("dummy"),
             config.model_provider.clone(),
+            config.codex_home.to_path_buf(),
+            std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            state_db.clone(),
+        );
+        let control = manager.agent_control();
+        Self {
+            _home: home,
+            config,
+            state_db,
+            manager,
+            control,
+        }
+    }
+
+    /// Builds a harness whose threads deterministically resolve to `provider`.
+    ///
+    /// `test_config()` is NOT hermetic — it falls through to the Gemini provider
+    /// whenever `GEMINI_API_KEY`/`GOOGLE_GENAI_USE_VERTEXAI` is set in the
+    /// environment. Tests that depend on a specific `wire_api` must pin it here
+    /// rather than relying on the default. The provider is set in both places
+    /// that determine the spawned child's `turn_context.provider`: the per-thread
+    /// `config.model_provider` and the manager's models provider.
+    async fn with_provider(provider: ModelProviderInfo, provider_id: &str) -> Self {
+        let (home, mut config) = test_config().await;
+        config.model_provider = provider.clone();
+        config.model_provider_id = provider_id.to_string();
+        let state_db = init_state_db(&config).await;
+        let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+            CodexAuth::from_api_key("dummy"),
+            provider,
             config.codex_home.to_path_buf(),
             std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
             state_db.clone(),
@@ -1793,6 +1828,149 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             /*trigger_turn*/ false,
         )
     ));
+}
+
+/// Drives a real V2 `ThreadSpawn` child (tester) to `TurnComplete` under a LIVE
+/// direct parent (worker) via path (a) — `send_event` ->
+/// `maybe_notify_parent_of_terminal_turn` -> `forward_child_completion_to_parent`
+/// — then asserts the delivered completion op carries `expected_trigger_turn`.
+///
+/// The provider is pinned explicitly so the completing child's
+/// `turn_context.provider.info().wire_api` is deterministic regardless of the
+/// dev machine's `GEMINI_API_KEY`/`GOOGLE_GENAI_USE_VERTEXAI` environment.
+async fn assert_v2_child_completion_trigger_turn(
+    provider: ModelProviderInfo,
+    provider_id: &str,
+    expected_trigger_turn: bool,
+) {
+    let expected_wire_api = provider.wire_api;
+    let harness = AgentControlHarness::with_provider(provider, provider_id).await;
+    let mut config = harness.config.clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+
+    let root = harness
+        .manager
+        .start_thread(config.clone())
+        .await
+        .expect("root thread should start");
+    let root_thread_id = root.thread_id;
+
+    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+    let worker_thread_id = harness
+        .control
+        .spawn_agent(
+            config.clone(),
+            text_input("hello worker"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root_thread_id,
+                depth: 1,
+                agent_path: Some(worker_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("worker spawn should succeed");
+
+    let tester_path = worker_path.join("tester").expect("tester path");
+    let tester_thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input("hello tester"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: worker_thread_id,
+                depth: 2,
+                agent_path: Some(tester_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("tester spawn should succeed");
+
+    let tester_thread = harness
+        .manager
+        .get_thread(tester_thread_id)
+        .await
+        .expect("tester thread should exist");
+    let tester_turn = tester_thread.codex.session.new_default_turn().await;
+    // Precondition: the completing child resolves to the pinned wire API — the
+    // Gemini gate in `forward_child_completion_to_parent` keys off exactly this.
+    assert_eq!(tester_turn.provider.info().wire_api, expected_wire_api);
+
+    tester_thread
+        .codex
+        .session
+        .send_event(
+            tester_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: tester_turn.sub_id.clone(),
+                last_agent_message: Some("done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    let expected_message = crate::session_prefix::format_subagent_notification_message(
+        tester_path.as_str(),
+        &AgentStatus::Completed(Some("done".to_string())),
+    );
+    let expected = (
+        worker_thread_id,
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                tester_path.clone(),
+                worker_path.clone(),
+                Vec::new(),
+                expected_message,
+                expected_trigger_turn,
+            ),
+        },
+    );
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .any(|entry| entry == expected)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "expected child completion op to direct parent with trigger_turn={expected_trigger_turn}"
+        )
+    });
+}
+
+#[tokio::test]
+async fn multi_agent_v2_gemini_child_completion_wakes_idle_parent() {
+    assert_v2_child_completion_trigger_turn(
+        ModelProviderInfo::create_gemini_provider(),
+        GEMINI_PROVIDER_ID,
+        /*expected_trigger_turn*/ true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn multi_agent_v2_non_gemini_child_completion_does_not_wake_idle_parent() {
+    let provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    assert_v2_child_completion_trigger_turn(
+        provider,
+        OPENAI_PROVIDER_ID,
+        /*expected_trigger_turn*/ false,
+    )
+    .await;
 }
 
 #[tokio::test]
