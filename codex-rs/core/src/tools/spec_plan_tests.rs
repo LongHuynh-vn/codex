@@ -1017,6 +1017,10 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     );
 
     let v2 = probe(|turn| {
+        // Pin an explicitly non-Gemini provider (Bedrock uses WireApi::Responses).
+        // The default test-harness provider is environment-dependent and can be
+        // Gemini, which surfaces the effective-count wording instead of the raw cap.
+        use_bedrock_provider(turn);
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
         update_config(turn, |config| {
             config.multi_agent_v2.max_concurrent_threads_per_session = 17;
@@ -1104,6 +1108,59 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
     assert!(
         !non_gemini_specs_json.contains(WAIT_SENTENCE),
         "non-Gemini providers must not include the Gemini usage hint: {non_gemini_specs_json}"
+    );
+}
+
+#[tokio::test]
+async fn gemini_spawn_agent_description_states_effective_concurrency_but_non_gemini_uses_raw_cap() {
+    // With max_concurrent_threads_per_session = 4, one slot is reserved for the
+    // root thread, so the effective spawnable sub-agent count on Gemini is 3.
+    let gemini = probe(|turn| {
+        use_gemini_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.max_concurrent_threads_per_session = 4;
+        });
+    })
+    .await;
+    let gemini_description = match gemini.visible_spec("spawn_agent") {
+        ToolSpec::Function(tool) => tool.description.as_str(),
+        other => panic!("expected spawn_agent function spec on Gemini, got {other:?}"),
+    };
+    assert!(
+        gemini_description.contains("spawn at most 3 sub-agents"),
+        "Gemini spawn_agent must advertise the effective count (cap - 1): {gemini_description:?}"
+    );
+    assert!(
+        gemini_description.contains("reserved for `/root`"),
+        "Gemini spawn_agent must note the reserved root slot: {gemini_description:?}"
+    );
+    assert!(
+        !gemini_description.contains("max_concurrent_threads_per_session = 4"),
+        "Gemini spawn_agent must not present the raw cap as the spawnable count: {gemini_description:?}"
+    );
+
+    // Non-Gemini (Bedrock / WireApi::Responses): the raw cap wording is preserved
+    // byte-for-byte and the Gemini effective-count phrasing must not leak in.
+    let non_gemini = probe(|turn| {
+        use_bedrock_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.max_concurrent_threads_per_session = 4;
+        });
+    })
+    .await;
+    let non_gemini_description = match non_gemini.visible_spec("spawn_agent") {
+        ToolSpec::Function(tool) => tool.description.as_str(),
+        other => panic!("expected spawn_agent function spec on Bedrock, got {other:?}"),
+    };
+    assert!(
+        non_gemini_description.contains("`max_concurrent_threads_per_session = 4`"),
+        "non-Gemini spawn_agent must keep the raw cap wording: {non_gemini_description:?}"
+    );
+    assert!(
+        !non_gemini_description.contains("reserved for `/root`"),
+        "non-Gemini spawn_agent must not include the Gemini effective-count phrase: {non_gemini_description:?}"
     );
 }
 

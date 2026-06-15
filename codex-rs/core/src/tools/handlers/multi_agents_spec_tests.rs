@@ -48,6 +48,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         include_usage_hint: true,
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
+        concurrency_wording: ConcurrencyWording::Raw,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -119,6 +120,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         include_usage_hint: true,
         usage_hint_text: None,
         max_concurrent_threads_per_session: None,
+        concurrency_wording: ConcurrencyWording::Raw,
     });
 
     let ToolSpec::Namespace(namespace) = tool else {
@@ -171,6 +173,7 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         include_usage_hint: true,
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
+        concurrency_wording: ConcurrencyWording::Raw,
     });
 
     let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
@@ -195,6 +198,7 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
         include_usage_hint: true,
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
+        concurrency_wording: ConcurrencyWording::Raw,
     });
 
     let ToolSpec::Function(ResponsesApiTool {

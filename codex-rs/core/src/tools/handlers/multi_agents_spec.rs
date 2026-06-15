@@ -18,6 +18,22 @@ const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
     "Service tier override for the new agent. Omit unless explicitly requested.";
 const MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT_DESCRIPTION: usize = 5;
 
+/// Selects how the `spawn_agent` description reports the session concurrency cap.
+///
+/// On the OpenAI/Responses path (and V1) we surface the raw
+/// `max_concurrent_threads_per_session` value verbatim. On the Gemini-native path
+/// the model misreads that raw cap as the number of sub-agents it can spawn at
+/// once, but one session slot is reserved for the root thread, so the effective
+/// spawnable count is `cap - 1`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConcurrencyWording {
+    /// Surface the raw cap verbatim (OpenAI/Responses, V1) — byte-identical wording.
+    #[default]
+    Raw,
+    /// Gemini: surface the effective spawnable count (cap - 1) and note the reserved root slot.
+    GeminiEffective,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SpawnAgentToolOptions {
     pub available_models: Vec<ModelPreset>,
@@ -26,6 +42,7 @@ pub struct SpawnAgentToolOptions {
     pub include_usage_hint: bool,
     pub usage_hint_text: Option<String>,
     pub max_concurrent_threads_per_session: Option<usize>,
+    pub concurrency_wording: ConcurrencyWording,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +119,7 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
             options.include_usage_hint,
             options.usage_hint_text,
             options.max_concurrent_threads_per_session,
+            options.concurrency_wording,
         ),
         strict: false,
         defer_loading: None,
@@ -768,14 +786,23 @@ fn spawn_agent_tool_description_v2(
     include_usage_hint: bool,
     usage_hint_text: Option<String>,
     max_concurrent_threads_per_session: Option<usize>,
+    concurrency_wording: ConcurrencyWording,
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
     let concurrency_guidance = max_concurrent_threads_per_session
-        .map(|limit| {
-            format!(
+        .map(|limit| match concurrency_wording {
+            ConcurrencyWording::Raw => format!(
                 "This session is configured with `max_concurrent_threads_per_session = {limit}` for concurrently open agent threads."
-            )
+            ),
+            ConcurrencyWording::GeminiEffective => {
+                // One slot is reserved for the root thread, so the effective
+                // number of sub-agents that can run concurrently is `cap - 1`.
+                let effective = limit.saturating_sub(1);
+                format!(
+                    "This session allows {effective} concurrently open sub-agent threads. The configured `max_concurrent_threads_per_session` is {limit}, but slot {limit} is reserved for `/root` itself — so spawn at most {effective} sub-agents at once."
+                )
+            }
         })
         .unwrap_or_default();
 
