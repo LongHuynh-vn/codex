@@ -4,9 +4,13 @@ use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
+use crate::session::TurnInput;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::session_prefix::format_subagent_notification_message;
+use crate::state::TaskKind;
+use crate::tasks::SessionTask;
+use crate::tasks::SessionTaskContext;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
@@ -72,6 +76,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -4153,6 +4158,194 @@ async fn complete_worker_turn(manager: &ThreadManager, agent_id: ThreadId, messa
             }),
         })
         .await;
+}
+
+struct ReleaseGatedParentTask {
+    release: Arc<Notify>,
+}
+
+impl SessionTask for ReleaseGatedParentTask {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Regular
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.release_gated_parent"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        _session: Arc<SessionTaskContext>,
+        _ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        cancellation_token: CancellationToken,
+    ) -> Option<String> {
+        tokio::select! {
+            _ = self.release.notified() => None,
+            _ = cancellation_token.cancelled() => None,
+        }
+    }
+}
+
+async fn complete_worker_turn_and_notify_parent(
+    manager: &ThreadManager,
+    agent_id: ThreadId,
+    message: &str,
+) {
+    let child_thread = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should exist");
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some(message.to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn multi_agent_v2_gemini_busy_parent_completion_starts_synthesis_with_reports() {
+    let (_seed_session, mut seed_turn) = make_session_and_context().await;
+    let mut config = (*seed_turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut seed_turn, config);
+    use_gemini_provider(&mut seed_turn);
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*seed_turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let parent_thread = root.thread;
+    let session = parent_thread.codex.session.clone();
+    let turn = session.new_default_turn().await;
+
+    let (id_a, _nick_a, _role_a, path_a) = spawn_worker(&session, &turn, "worker_a").await;
+    let (id_b, _nick_b, _role_b, path_b) = spawn_worker(&session, &turn, "worker_b").await;
+    let expected_a = format_subagent_notification_message(
+        path_a.as_str(),
+        &AgentStatus::Completed(Some("a result".to_string())),
+    );
+    let expected_b = format_subagent_notification_message(
+        path_b.as_str(),
+        &AgentStatus::Completed(Some("b result".to_string())),
+    );
+
+    let release = Arc::new(Notify::new());
+    session
+        .spawn_task(
+            turn.clone(),
+            Vec::new(),
+            ReleaseGatedParentTask {
+                release: Arc::clone(&release),
+            },
+        )
+        .await;
+    assert!(
+        session.active_turn.lock().await.is_some(),
+        "parent turn should remain active before child completions"
+    );
+
+    complete_worker_turn_and_notify_parent(&manager, id_a, "a result").await;
+    complete_worker_turn_and_notify_parent(&manager, id_b, "b result").await;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let active_turn_present = session.active_turn.lock().await.is_some();
+            if active_turn_present && session.input_queue.has_trigger_turn_mailbox_items().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("trigger-turn mailbox work should queue while the parent turn is active");
+
+    release.notify_waiters();
+
+    let followup_turn_id = match timeout(Duration::from_secs(5), async {
+        loop {
+            let event = parent_thread
+                .next_event()
+                .await
+                .expect("parent event channel should stay open");
+            if let EventMsg::TurnStarted(started) = event.msg
+                && started.turn_id != turn.sub_id
+            {
+                break started.turn_id;
+            }
+        }
+    })
+    .await
+    {
+        Ok(turn_id) => turn_id,
+        Err(_) => {
+            panic!(
+                "no follow-up turn: expected Gemini trigger-turn mailbox mail to start a synthesis turn after active parent completed"
+            )
+        }
+    };
+    assert_ne!(followup_turn_id, turn.sub_id);
+    assert!(
+        !session.input_queue.has_trigger_turn_mailbox_items().await,
+        "follow-up turn should drain trigger-turn mailbox work"
+    );
+
+    if timeout(Duration::from_secs(5), async {
+        loop {
+            let communications = session
+                .clone_history()
+                .await
+                .raw_items()
+                .iter()
+                .filter_map(|item| match item {
+                    ResponseItem::Message { content, .. } => {
+                        InterAgentCommunication::from_message_content(content)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let has_a = communications.iter().any(|communication| {
+                communication.author == path_a
+                    && communication.recipient == AgentPath::root()
+                    && communication.content == expected_a
+                    && communication.trigger_turn
+            });
+            let has_b = communications.iter().any(|communication| {
+                communication.author == path_b
+                    && communication.recipient == AgentPath::root()
+                    && communication.content == expected_b
+                    && communication.trigger_turn
+            });
+            if has_a && has_b {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        panic!(
+            "follow-up turn lacks child report bodies: expected both child completion reports in parent-visible history"
+        );
+    }
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test]
