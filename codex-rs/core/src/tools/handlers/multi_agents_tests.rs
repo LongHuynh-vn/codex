@@ -5,9 +5,12 @@ use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_rx;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -20,6 +23,9 @@ use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::GEMINI_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -35,6 +41,10 @@ use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CollabAgentRef;
+use codex_protocol::protocol::CollabAgentStatusEntry;
+use codex_protocol::protocol::CollabWaitingEndEvent;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
@@ -137,6 +147,40 @@ model_reasoning_effort = "minimal"
 fn set_turn_config(turn: &mut TurnContext, config: crate::config::Config) {
     turn.multi_agent_version = config.multi_agent_version_from_features();
     turn.config = Arc::new(config);
+}
+
+fn use_bedrock_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    turn.config = Arc::new(config);
+}
+
+fn use_gemini_provider(turn: &mut TurnContext) {
+    let mut provider_info = ModelProviderInfo::create_gemini_provider();
+    provider_info.experimental_bearer_token = Some("test-gemini-key".to_string());
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = GEMINI_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    turn.config = Arc::new(config);
+}
+
+async fn last_waiting_end_event(rx: &async_channel::Receiver<Event>) -> CollabWaitingEndEvent {
+    let deadline = Duration::from_secs(2);
+    let start = std::time::Instant::now();
+    loop {
+        let remaining = deadline.saturating_sub(start.elapsed());
+        let event = timeout(remaining, rx.recv())
+            .await
+            .expect("timed out waiting for CollabWaitingEnd")
+            .expect("event channel should be open");
+        if let EventMsg::CollabWaitingEnd(event) = event.msg {
+            return event;
+        }
+    }
 }
 
 fn expect_text_output<T>(output: T) -> (String, Option<bool>)
@@ -2945,6 +2989,8 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
             timed_out: false,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3010,6 +3056,8 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() 
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait timed out.".to_string(),
             timed_out: true,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3065,6 +3113,8 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait timed out.".to_string(),
             timed_out: true,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3105,6 +3155,8 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait timed out.".to_string(),
             timed_out: true,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3170,6 +3222,8 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() 
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait timed out.".to_string(),
             timed_out: true,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3429,6 +3483,8 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
             timed_out: false,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3510,6 +3566,8 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
             timed_out: false,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3601,6 +3659,8 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
             timed_out: false,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert_eq!(success, None);
@@ -3689,9 +3749,621 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
             timed_out: false,
+            statuses: None,
+            agent_statuses: None,
         }
     );
     assert!(!content.contains("sensitive child output"));
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_reports_completed_child_status_without_mailbox() {
+    let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    {
+        let session = Arc::get_mut(&mut session).expect("session should be uniquely owned");
+        session.services.agent_control = manager.agent_control();
+        session.thread_id = root.thread_id;
+    }
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    {
+        let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
+        set_turn_config(turn, config);
+        use_gemini_provider(turn);
+    }
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "boot worker",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("spawn worker");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker should resolve");
+    let agent_metadata = session
+        .services
+        .agent_control
+        .get_agent_metadata(agent_id)
+        .expect("worker metadata");
+    let child_thread = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should exist");
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: child_turn.sub_id.clone(),
+            msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("child result".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        })
+        .await;
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session.clone(),
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("completed child status should unblock wait_agent")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    let completed = AgentStatus::Completed(Some("child result".to_string()));
+    let expected_statuses = HashMap::from([(agent_id, completed.clone())]);
+    let expected_agent_statuses = vec![CollabAgentStatusEntry {
+        thread_id: agent_id,
+        agent_nickname: agent_metadata.agent_nickname,
+        agent_role: agent_metadata.agent_role,
+        status: completed,
+    }];
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+            statuses: Some(expected_statuses.clone()),
+            agent_statuses: Some(expected_agent_statuses.clone()),
+        }
+    );
+    let end_event = last_waiting_end_event(&rx).await;
+    assert_eq!(
+        (
+            end_event.sender_thread_id,
+            end_event.call_id,
+            end_event.agent_statuses,
+            end_event.statuses,
+        ),
+        (
+            session.thread_id,
+            "call-1".to_string(),
+            expected_agent_statuses,
+            expected_statuses,
+        )
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_non_gemini_ignores_completed_child_without_mailbox() {
+    let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    {
+        let session = Arc::get_mut(&mut session).expect("session should be uniquely owned");
+        session.services.agent_control = manager.agent_control();
+        session.thread_id = root.thread_id;
+    }
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.min_wait_timeout_ms = 0;
+    config.multi_agent_v2.max_wait_timeout_ms = 1_000;
+    config.multi_agent_v2.default_wait_timeout_ms = 1;
+    {
+        let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
+        set_turn_config(turn, config);
+        use_bedrock_provider(turn);
+    }
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "boot worker",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("spawn worker");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker should resolve");
+    let child_thread = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should exist");
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: child_turn.sub_id.clone(),
+            msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some("child result".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        })
+        .await;
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session.clone(),
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 1})),
+        )),
+    )
+    .await
+    .expect("summary wait should return after its timeout")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(content, r#"{"message":"Wait timed out.","timed_out":true}"#);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait timed out.".to_string(),
+            timed_out: true,
+            statuses: None,
+            agent_statuses: None,
+        }
+    );
+    let end_event = last_waiting_end_event(&rx).await;
+    assert_eq!(
+        end_event.agent_statuses,
+        Vec::<CollabAgentStatusEntry>::new()
+    );
+    assert_eq!(end_event.statuses, HashMap::new());
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_returns_immediately_without_live_children() {
+    let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    {
+        let session = Arc::get_mut(&mut session).expect("session should be uniquely owned");
+        session.services.agent_control = manager.agent_control();
+        session.thread_id = root.thread_id;
+    }
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    {
+        let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
+        set_turn_config(turn, config);
+        use_gemini_provider(turn);
+    }
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session.clone(),
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("no live children should return immediately")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "No live child agents to wait for.".to_string(),
+            timed_out: false,
+            statuses: Some(HashMap::new()),
+            agent_statuses: Some(Vec::new()),
+        }
+    );
+    let end_event = last_waiting_end_event(&rx).await;
+    assert_eq!(
+        end_event.agent_statuses,
+        Vec::<CollabAgentStatusEntry>::new()
+    );
+    assert_eq!(end_event.statuses, HashMap::new());
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_missing_enumerated_child_is_terminal_not_found() {
+    let (mut session, _turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let missing_id = ThreadId::new();
+    let receiver_agents = vec![CollabAgentRef {
+        thread_id: missing_id,
+        agent_nickname: Some("Missing".to_string()),
+        agent_role: Some("explorer".to_string()),
+    }];
+
+    let subscriptions = crate::tools::handlers::multi_agents_v2::wait::subscribe_child_statuses(
+        &session,
+        &receiver_agents,
+    )
+    .await
+    .expect("missing child should be represented as terminal NotFound");
+    assert_eq!(
+        subscriptions.terminal_statuses,
+        HashMap::from([(missing_id, AgentStatus::NotFound)])
+    );
+    assert_eq!(subscriptions.status_rxs.len(), 0);
+}
+
+async fn gemini_wait_setup() -> (
+    Arc<crate::session::session::Session>,
+    Arc<TurnContext>,
+    async_channel::Receiver<Event>,
+    ThreadManager,
+) {
+    let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    {
+        let session = Arc::get_mut(&mut session).expect("session should be uniquely owned");
+        session.services.agent_control = manager.agent_control();
+        session.thread_id = root.thread_id;
+    }
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    {
+        let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
+        set_turn_config(turn, config);
+        use_gemini_provider(turn);
+    }
+    (session, turn, rx, manager)
+}
+
+async fn spawn_worker(
+    session: &Arc<crate::session::session::Session>,
+    turn: &Arc<TurnContext>,
+    task_name: &str,
+) -> (ThreadId, Option<String>, Option<String>, AgentPath) {
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": format!("boot {task_name}"),
+                "task_name": task_name,
+            })),
+        ))
+        .await
+        .expect("spawn worker should succeed");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, task_name)
+        .await
+        .expect("worker should resolve");
+    let metadata = session
+        .services
+        .agent_control
+        .get_agent_metadata(agent_id)
+        .expect("worker metadata");
+    (
+        agent_id,
+        metadata.agent_nickname,
+        metadata.agent_role,
+        metadata.agent_path.expect("worker path"),
+    )
+}
+
+async fn complete_worker_turn(manager: &ThreadManager, agent_id: ThreadId, message: &str) {
+    let child_thread = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should exist");
+    let child_turn = child_thread.codex.session.new_default_turn().await;
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: child_turn.sub_id.clone(),
+            msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                last_agent_message: Some(message.to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_blocks_until_all_children_terminal() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+
+    let (id_a, nick_a, role_a, _path_a) = spawn_worker(&session, &turn, "worker_a").await;
+    let (id_b, nick_b, role_b, _path_b) = spawn_worker(&session, &turn, "worker_b").await;
+
+    // worker_a is already terminal at entry; worker_b is still running.
+    complete_worker_turn(&manager, id_a, "a result").await;
+
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2::new_with_output_mode(
+                WaitAgentTimeoutOptions::default(),
+                WaitAgentV2OutputMode::GeminiStatuses,
+            )
+            .handle(invocation(
+                session,
+                turn,
+                "wait_agent",
+                function_payload(json!({"timeout_ms": 10_000})),
+            ))
+            .await
+        }
+    });
+
+    // Give the wait time to subscribe and block; it must NOT return on the
+    // already-terminal worker_a alone (this was the fan-out > 1 spin).
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !wait_task.is_finished(),
+        "wait_agent must keep blocking while worker_b is still running"
+    );
+
+    // Now finish worker_b -> the wait should resolve with BOTH statuses.
+    complete_worker_turn(&manager, id_b, "b result").await;
+
+    let output = timeout(Duration::from_secs(5), wait_task)
+        .await
+        .expect("wait_agent should resolve once all children are terminal")
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+
+    assert_eq!(result.message, "Wait completed.".to_string());
+    assert!(!result.timed_out);
+    assert_eq!(
+        result.statuses,
+        Some(HashMap::from([
+            (id_a, AgentStatus::Completed(Some("a result".to_string()))),
+            (id_b, AgentStatus::Completed(Some("b result".to_string()))),
+        ]))
+    );
+
+    let mut agent_statuses = result.agent_statuses.expect("agent statuses present");
+    agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    let mut expected_agent_statuses = vec![
+        CollabAgentStatusEntry {
+            thread_id: id_a,
+            agent_nickname: nick_a,
+            agent_role: role_a,
+            status: AgentStatus::Completed(Some("a result".to_string())),
+        },
+        CollabAgentStatusEntry {
+            thread_id: id_b,
+            agent_nickname: nick_b,
+            agent_role: role_b,
+            status: AgentStatus::Completed(Some("b result".to_string())),
+        },
+    ];
+    expected_agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    assert_eq!(agent_statuses, expected_agent_statuses);
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_ignores_spurious_mailbox_notification() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+
+    let (id_a, _nick_a, _role_a, path_a) = spawn_worker(&session, &turn, "worker_a").await;
+    let (id_b, _nick_b, _role_b, _path_b) = spawn_worker(&session, &turn, "worker_b").await;
+
+    complete_worker_turn(&manager, id_a, "a result").await;
+
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2::new_with_output_mode(
+                WaitAgentTimeoutOptions::default(),
+                WaitAgentV2OutputMode::GeminiStatuses,
+            )
+            .handle(invocation(
+                session,
+                turn,
+                "wait_agent",
+                function_payload(json!({"timeout_ms": 10_000})),
+            ))
+            .await
+        }
+    });
+    tokio::task::yield_now().await;
+
+    // A child-completion notification (or any mailbox traffic) must NOT end the wait
+    // while worker_b is still running -- this was the original spin source.
+    for _ in 0..3 {
+        session
+            .input_queue
+            .enqueue_mailbox_communication(InterAgentCommunication::new(
+                path_a.clone(),
+                AgentPath::root(),
+                Vec::new(),
+                "spurious".to_string(),
+                /*trigger_turn*/ false,
+            ))
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !wait_task.is_finished(),
+        "spurious mailbox notifications must not end the wait early"
+    );
+
+    complete_worker_turn(&manager, id_b, "b result").await;
+
+    let output = timeout(Duration::from_secs(5), wait_task)
+        .await
+        .expect("wait_agent should resolve once all children are terminal")
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, _success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert!(!result.timed_out);
+    assert_eq!(result.message, "Wait completed.".to_string());
+    assert_eq!(
+        result.statuses,
+        Some(HashMap::from([
+            (id_a, AgentStatus::Completed(Some("a result".to_string()))),
+            (id_b, AgentStatus::Completed(Some("b result".to_string()))),
+        ]))
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_times_out_with_partial_statuses() {
+    let (session, mut turn, _rx, manager) = gemini_wait_setup().await;
+
+    let (id_a, nick_a, role_a, _path_a) = spawn_worker(&session, &turn, "worker_a").await;
+    let (_id_b, _nick_b, _role_b, _path_b) = spawn_worker(&session, &turn, "worker_b").await;
+
+    // worker_a completes; worker_b stays running so the deadline must fire.
+    complete_worker_turn(&manager, id_a, "a result").await;
+
+    // Shrink the wait bounds so the deadline elapses quickly.
+    {
+        let mut config = (*turn.config).clone();
+        config.multi_agent_v2.min_wait_timeout_ms = 0;
+        config.multi_agent_v2.max_wait_timeout_ms = 10_000;
+        config.multi_agent_v2.default_wait_timeout_ms = 1;
+        let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
+        set_turn_config(turn, config);
+    }
+
+    let output = timeout(
+        Duration::from_secs(5),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session.clone(),
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 200})),
+        )),
+    )
+    .await
+    .expect("wait_agent should time out within the test budget")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert!(
+        result.timed_out,
+        "deadline should fire while worker_b is still running"
+    );
+    assert_eq!(result.message, "Wait timed out.".to_string());
+    // Only the terminal child is reported on timeout.
+    assert_eq!(
+        result.statuses,
+        Some(HashMap::from([(
+            id_a,
+            AgentStatus::Completed(Some("a result".to_string()))
+        )]))
+    );
+    assert_eq!(
+        result.agent_statuses,
+        Some(vec![CollabAgentStatusEntry {
+            thread_id: id_a,
+            agent_nickname: nick_a,
+            agent_role: role_a,
+            status: AgentStatus::Completed(Some("a result".to_string())),
+        }])
+    );
     assert_eq!(success, None);
 }
 

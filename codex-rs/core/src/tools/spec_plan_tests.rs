@@ -1060,6 +1060,99 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
 }
 
 #[tokio::test]
+async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_does_not() {
+    // Distinctive substrings of the Gemini-gated `GEMINI_MULTI_AGENT_V2_USAGE_HINT` hint.
+    const NEW_GUIDANCE: &str = "spawn one bounded sub-agent per part";
+    const WAIT_SENTENCE: &str = "keep calling `wait_agent`";
+
+    let gemini = probe(|turn| {
+        use_gemini_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+    let gemini_description = match gemini.visible_spec("spawn_agent") {
+        ToolSpec::Function(tool) => tool.description.as_str(),
+        other => panic!("expected spawn_agent function spec on Gemini, got {other:?}"),
+    };
+    assert!(
+        gemini_description.contains(WAIT_SENTENCE),
+        "Gemini spawn_agent must keep wait-discipline guidance: {gemini_description:?}"
+    );
+    assert!(
+        gemini_description.contains(NEW_GUIDANCE),
+        "Gemini spawn_agent must include when-to-delegate guidance: {gemini_description:?}"
+    );
+
+    // The default test-harness provider is environment-dependent
+    // (`default_model_provider_id` selects Gemini when GEMINI_API_KEY is set), so the
+    // negative case pins an explicitly non-Gemini provider. Bedrock uses
+    // WireApi::Responses — the OpenAI/Responses path the invariant protects.
+    let non_gemini = probe(|turn| {
+        use_bedrock_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+    // Search every visible tool's serialized spec so the assertion is robust to
+    // multi-agent v2 tool shape/namespacing differences on the Responses path: it
+    // fails only if the Gemini hint actually leaks into a tool description.
+    let non_gemini_specs_json =
+        serde_json::to_string(&non_gemini.visible_specs).expect("serialize visible specs");
+    assert!(
+        !non_gemini_specs_json.contains(NEW_GUIDANCE),
+        "non-Gemini providers must not include Gemini delegation guidance: {non_gemini_specs_json}"
+    );
+    assert!(
+        !non_gemini_specs_json.contains(WAIT_SENTENCE),
+        "non-Gemini providers must not include the Gemini usage hint: {non_gemini_specs_json}"
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_status_output_is_gemini_only() {
+    let gemini = probe(|turn| {
+        use_gemini_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+    let gemini_wait_schema = match gemini.visible_spec("wait_agent") {
+        ToolSpec::Function(tool) => tool.output_schema.as_ref().expect("wait output schema"),
+        other => panic!("expected wait_agent function spec on Gemini, got {other:?}"),
+    };
+    assert!(
+        gemini_wait_schema["properties"].get("statuses").is_some(),
+        "Gemini wait_agent should expose status output: {gemini_wait_schema}"
+    );
+    assert!(
+        gemini_wait_schema["properties"]
+            .get("agent_statuses")
+            .is_some(),
+        "Gemini wait_agent should expose metadata-rich status output: {gemini_wait_schema}"
+    );
+
+    let non_gemini = probe(|turn| {
+        use_bedrock_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+    let non_gemini_wait_schema = match non_gemini.visible_spec("wait_agent") {
+        ToolSpec::Function(tool) => tool.output_schema.as_ref().expect("wait output schema"),
+        other => panic!("expected wait_agent function spec on non-Gemini, got {other:?}"),
+    };
+    assert!(
+        non_gemini_wait_schema["properties"]
+            .get("statuses")
+            .is_none(),
+        "non-Gemini wait_agent must stay summary-only: {non_gemini_wait_schema}"
+    );
+    assert!(
+        non_gemini_wait_schema["properties"]
+            .get("agent_statuses")
+            .is_none(),
+        "non-Gemini wait_agent must stay summary-only: {non_gemini_wait_schema}"
+    );
+}
+
+#[tokio::test]
 async fn tool_mode_selector_overrides_feature_flags() {
     let direct = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);

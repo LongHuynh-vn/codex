@@ -44,6 +44,7 @@ use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -97,7 +98,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
-const GEMINI_MULTI_AGENT_V2_USAGE_HINT: &str = "Gemini subagent guidance: after spawning multiple agents, keep calling `wait_agent` until you have received a final-status notification for every spawned task. Do not produce the final answer after only the first child completes.";
+const GEMINI_MULTI_AGENT_V2_USAGE_HINT: &str = "Gemini subagent guidance: after spawning multiple agents, keep calling `wait_agent` until you have received a final-status notification for every spawned task. Do not produce the final answer after only the first child completes. When the user's task naturally splits into multiple independent parts that can progress at once, spawn one bounded sub-agent per part instead of doing them sequentially — but only when each part is concrete and self-contained and parallelizing them materially shortens completion. Do not delegate trivial, single-step, or tightly-coupled work, or anything you would finish faster locally; just do it yourself. Once children are running, integrate every child's result into one synthesized answer rather than answering from a single child.";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -768,7 +769,14 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             ));
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(
-                    WaitAgentHandlerV2::new(context.wait_agent_timeouts),
+                    WaitAgentHandlerV2::new_with_output_mode(
+                        context.wait_agent_timeouts,
+                        if turn_context.provider.info().wire_api == WireApi::GeminiNative {
+                            WaitAgentV2OutputMode::GeminiStatuses
+                        } else {
+                            WaitAgentV2OutputMode::SummaryOnly
+                        },
+                    ),
                     tool_namespace,
                 ),
                 exposure,

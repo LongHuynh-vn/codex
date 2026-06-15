@@ -1199,7 +1199,7 @@ impl AgentControl {
         ))
     }
 
-    async fn open_thread_spawn_children(
+    pub(crate) async fn open_thread_spawn_children(
         &self,
         parent_thread_id: ThreadId,
     ) -> CodexResult<Vec<(ThreadId, AgentMetadata)>> {

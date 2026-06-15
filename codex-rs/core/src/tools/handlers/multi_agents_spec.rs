@@ -251,7 +251,17 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
     })
 }
 
-pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WaitAgentV2OutputMode {
+    #[default]
+    SummaryOnly,
+    GeminiStatuses,
+}
+
+pub fn create_wait_agent_tool_v2(
+    options: WaitAgentTimeoutOptions,
+    output_mode: WaitAgentV2OutputMode,
+) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
         description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. Does not return the content; returns either a summary of which agents have updates (if any), or a timeout summary if no mailbox update arrives before the deadline."
@@ -259,7 +269,7 @@ pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
         strict: false,
         defer_loading: None,
         parameters: wait_agent_tool_parameters_v2(options),
-        output_schema: Some(wait_output_schema_v2()),
+        output_schema: Some(wait_output_schema_v2(output_mode)),
     })
 }
 
@@ -480,8 +490,8 @@ fn wait_output_schema_v1() -> Value {
     })
 }
 
-fn wait_output_schema_v2() -> Value {
-    json!({
+fn wait_output_schema_v2(output_mode: WaitAgentV2OutputMode) -> Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "message": {
@@ -495,7 +505,52 @@ fn wait_output_schema_v2() -> Value {
         },
         "required": ["message", "timed_out"],
         "additionalProperties": false
-    })
+    });
+
+    if output_mode == WaitAgentV2OutputMode::GeminiStatuses
+        && let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut)
+    {
+        properties.insert(
+            "statuses".to_string(),
+            json!({
+                "type": "object",
+                "description": "Final statuses keyed by agent id.",
+                "additionalProperties": agent_status_output_schema()
+            }),
+        );
+        properties.insert(
+            "agent_statuses".to_string(),
+            json!({
+                "type": "array",
+                "description": "Final statuses with receiver metadata.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {
+                            "type": "string",
+                            "description": "Thread ID of the receiver agent."
+                        },
+                        "agent_nickname": {
+                            "type": ["string", "null"],
+                            "description": "User-facing nickname for the receiver agent when available."
+                        },
+                        "agent_role": {
+                            "type": ["string", "null"],
+                            "description": "Role assigned to the receiver agent when available."
+                        },
+                        "status": {
+                            "description": "Final status of the receiver agent.",
+                            "allOf": [agent_status_output_schema()]
+                        }
+                    },
+                    "required": ["thread_id", "status"],
+                    "additionalProperties": false
+                }
+            }),
+        );
+    }
+
+    schema
 }
 
 fn close_agent_output_schema() -> Value {
