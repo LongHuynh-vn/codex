@@ -1171,10 +1171,23 @@ async fn multi_agent_v2_wait_agent_status_output_is_gemini_only() {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
     .await;
-    let gemini_wait_schema = match gemini.visible_spec("wait_agent") {
-        ToolSpec::Function(tool) => tool.output_schema.as_ref().expect("wait output schema"),
+    let (gemini_wait_parameters, gemini_wait_schema) = match gemini.visible_spec("wait_agent") {
+        ToolSpec::Function(tool) => (
+            &tool.parameters,
+            tool.output_schema.as_ref().expect("wait output schema"),
+        ),
         other => panic!("expected wait_agent function spec on Gemini, got {other:?}"),
     };
+    let gemini_wait_properties = gemini_wait_parameters
+        .properties
+        .as_ref()
+        .expect("wait_agent should use object params");
+    assert_eq!(
+        gemini_wait_properties
+            .get("timeout_ms")
+            .and_then(|schema| schema.description.as_deref()),
+        Some("Timeout in milliseconds. Defaults to 120000, min 10000, max 3600000.")
+    );
     assert!(
         gemini_wait_schema["properties"].get("statuses").is_some(),
         "Gemini wait_agent should expose status output: {gemini_wait_schema}"
@@ -1191,10 +1204,24 @@ async fn multi_agent_v2_wait_agent_status_output_is_gemini_only() {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
     .await;
-    let non_gemini_wait_schema = match non_gemini.visible_spec("wait_agent") {
-        ToolSpec::Function(tool) => tool.output_schema.as_ref().expect("wait output schema"),
-        other => panic!("expected wait_agent function spec on non-Gemini, got {other:?}"),
-    };
+    let (non_gemini_wait_parameters, non_gemini_wait_schema) =
+        match non_gemini.visible_spec("wait_agent") {
+            ToolSpec::Function(tool) => (
+                &tool.parameters,
+                tool.output_schema.as_ref().expect("wait output schema"),
+            ),
+            other => panic!("expected wait_agent function spec on non-Gemini, got {other:?}"),
+        };
+    let non_gemini_wait_properties = non_gemini_wait_parameters
+        .properties
+        .as_ref()
+        .expect("wait_agent should use object params");
+    assert_eq!(
+        non_gemini_wait_properties
+            .get("timeout_ms")
+            .and_then(|schema| schema.description.as_deref()),
+        Some("Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.")
+    );
     assert!(
         non_gemini_wait_schema["properties"]
             .get("statuses")

@@ -21,6 +21,7 @@ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHand
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::wait::effective_wait_agent_v2_timeout_options;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
@@ -30,6 +31,7 @@ use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::GEMINI_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -171,6 +173,45 @@ fn use_gemini_provider(turn: &mut TurnContext) {
     config.model_provider = provider_info.clone();
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
     turn.config = Arc::new(config);
+}
+
+#[test]
+fn multi_agent_v2_wait_agent_effective_default_is_longer_for_gemini() {
+    let config = crate::config::MultiAgentV2Config::default();
+
+    let options = effective_wait_agent_v2_timeout_options(&config, WireApi::GeminiNative);
+
+    assert_eq!(options.default_timeout_ms, 120_000);
+}
+
+#[test]
+fn multi_agent_v2_wait_agent_effective_default_stays_configured_for_non_gemini() {
+    let config = crate::config::MultiAgentV2Config::default();
+
+    let options = effective_wait_agent_v2_timeout_options(&config, WireApi::Responses);
+
+    assert_eq!(options.default_timeout_ms, 30_000);
+}
+
+#[test]
+fn multi_agent_v2_wait_agent_gemini_effective_default_clamps_to_configured_max() {
+    let mut config = crate::config::MultiAgentV2Config::default();
+    config.max_wait_timeout_ms = 60_000;
+
+    let options = effective_wait_agent_v2_timeout_options(&config, WireApi::GeminiNative);
+
+    assert_eq!(options.default_timeout_ms, 60_000);
+}
+
+#[test]
+fn multi_agent_v2_wait_agent_gemini_effective_default_clamps_to_configured_min() {
+    let mut config = crate::config::MultiAgentV2Config::default();
+    config.min_wait_timeout_ms = 180_000;
+    config.max_wait_timeout_ms = 240_000;
+
+    let options = effective_wait_agent_v2_timeout_options(&config, WireApi::GeminiNative);
+
+    assert_eq!(options.default_timeout_ms, 180_000);
 }
 
 async fn last_waiting_end_event(rx: &async_channel::Receiver<Event>) -> CollabWaitingEndEvent {
@@ -3080,6 +3121,7 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
     config.multi_agent_v2.max_wait_timeout_ms = 1_000;
     config.multi_agent_v2.default_wait_timeout_ms = 50;
     set_turn_config(&mut turn, config);
+    use_bedrock_provider(&mut turn);
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 

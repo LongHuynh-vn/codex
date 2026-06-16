@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::status::is_final;
+use crate::config::MultiAgentV2Config;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
@@ -19,6 +20,26 @@ use tokio::sync::watch::Receiver;
 use tokio::time::Instant;
 use tokio::time::sleep_until;
 use tokio::time::timeout_at;
+
+pub(crate) const GEMINI_DEFAULT_MULTI_AGENT_V2_WAIT_TIMEOUT_MS: i64 = 120_000;
+
+pub(crate) fn effective_wait_agent_v2_timeout_options(
+    config: &MultiAgentV2Config,
+    wire_api: WireApi,
+) -> WaitAgentTimeoutOptions {
+    let default_timeout_ms = if wire_api == WireApi::GeminiNative {
+        GEMINI_DEFAULT_MULTI_AGENT_V2_WAIT_TIMEOUT_MS
+            .clamp(config.min_wait_timeout_ms, config.max_wait_timeout_ms)
+    } else {
+        config.default_wait_timeout_ms
+    };
+
+    WaitAgentTimeoutOptions {
+        default_timeout_ms,
+        min_timeout_ms: config.min_wait_timeout_ms,
+        max_timeout_ms: config.max_wait_timeout_ms,
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -61,9 +82,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
-        let min_timeout_ms = turn.config.multi_agent_v2.min_wait_timeout_ms;
-        let max_timeout_ms = turn.config.multi_agent_v2.max_wait_timeout_ms;
-        let default_timeout_ms = turn.config.multi_agent_v2.default_wait_timeout_ms;
+        let options = effective_wait_agent_v2_timeout_options(
+            &turn.config.multi_agent_v2,
+            turn.provider.info().wire_api,
+        );
+        let min_timeout_ms = options.min_timeout_ms;
+        let max_timeout_ms = options.max_timeout_ms;
+        let default_timeout_ms = options.default_timeout_ms;
         let timeout_ms = match args.timeout_ms {
             Some(ms) if ms < min_timeout_ms => {
                 return Err(FunctionCallError::RespondToModel(format!(
