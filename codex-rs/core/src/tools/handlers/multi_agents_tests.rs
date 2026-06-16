@@ -21,7 +21,9 @@ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHand
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::wait::GEMINI_MULTI_AGENT_V2_WAIT_TIMEOUT_FLOOR_MS;
 use crate::tools::handlers::multi_agents_v2::wait::effective_wait_agent_v2_timeout_options;
+use crate::tools::handlers::multi_agents_v2::wait::floor_gemini_wait_timeout_ms;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
@@ -212,6 +214,22 @@ fn multi_agent_v2_wait_agent_gemini_effective_default_clamps_to_configured_min()
     let options = effective_wait_agent_v2_timeout_options(&config, WireApi::GeminiNative);
 
     assert_eq!(options.default_timeout_ms, 180_000);
+}
+
+#[test]
+fn multi_agent_v2_wait_agent_gemini_floor_timeout_ms_handles_short_and_capped_values() {
+    let floor = GEMINI_MULTI_AGENT_V2_WAIT_TIMEOUT_FLOOR_MS;
+
+    assert_eq!(
+        floor_gemini_wait_timeout_ms(15_000, floor, 3_600_000),
+        floor
+    );
+    assert_eq!(floor_gemini_wait_timeout_ms(floor, floor, 3_600_000), floor);
+    assert_eq!(
+        floor_gemini_wait_timeout_ms(180_000, floor, 3_600_000),
+        180_000
+    );
+    assert_eq!(floor_gemini_wait_timeout_ms(15_000, floor, 60_000), 60_000);
 }
 
 async fn last_waiting_end_event(rx: &async_channel::Receiver<Event>) -> CollabWaitingEndEvent {
@@ -4568,6 +4586,106 @@ async fn multi_agent_v2_wait_agent_gemini_blocks_until_all_children_terminal() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_floors_short_explicit_timeout() {
+    let (session, mut turn, rx, manager) = gemini_wait_setup().await;
+
+    let (id_a, nick_a, role_a, _path_a) = spawn_worker(&session, &turn, "worker_a").await;
+    let (id_b, nick_b, role_b, _path_b) = spawn_worker(&session, &turn, "worker_b").await;
+
+    complete_worker_turn(&manager, id_a, "a result").await;
+
+    {
+        let mut config = (*turn.config).clone();
+        config.multi_agent_v2.min_wait_timeout_ms = 0;
+        config.multi_agent_v2.max_wait_timeout_ms = 30_000;
+        config.multi_agent_v2.default_wait_timeout_ms = 50;
+        let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
+        set_turn_config(turn, config);
+    }
+
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandlerV2::new_with_output_mode(
+                WaitAgentTimeoutOptions::default(),
+                WaitAgentV2OutputMode::GeminiStatuses,
+            )
+            .handle(invocation(
+                session,
+                turn,
+                "wait_agent",
+                function_payload(json!({"timeout_ms": 50})),
+            ))
+            .await
+        }
+    });
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.expect("event channel should be open");
+            if matches!(event.msg, EventMsg::CollabWaitingBegin(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("wait_agent should emit CollabWaitingBegin");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        !wait_task.is_finished(),
+        "Gemini status wait should floor an in-range short timeout"
+    );
+
+    complete_worker_turn_and_notify_parent(&manager, id_b, "b result").await;
+
+    let output = timeout(Duration::from_secs(5), wait_task)
+        .await
+        .expect("wait_agent should resolve once all children are terminal")
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let mut result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+
+    let mut agent_statuses = result
+        .agent_statuses
+        .take()
+        .expect("agent statuses present");
+    agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    let mut expected_agent_statuses = vec![
+        CollabAgentStatusEntry {
+            thread_id: id_a,
+            agent_nickname: nick_a,
+            agent_role: role_a,
+            status: AgentStatus::Completed(Some("a result".to_string())),
+        },
+        CollabAgentStatusEntry {
+            thread_id: id_b,
+            agent_nickname: nick_b,
+            agent_role: role_b,
+            status: AgentStatus::Completed(Some("b result".to_string())),
+        },
+    ];
+    expected_agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    result.agent_statuses = Some(agent_statuses);
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+            statuses: Some(HashMap::from([
+                (id_a, AgentStatus::Completed(Some("a result".to_string()))),
+                (id_b, AgentStatus::Completed(Some("b result".to_string()))),
+            ])),
+            agent_statuses: Some(expected_agent_statuses),
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_wait_agent_gemini_ignores_spurious_mailbox_notification() {
     let (session, turn, _rx, manager) = gemini_wait_setup().await;
 
@@ -4650,7 +4768,7 @@ async fn multi_agent_v2_wait_agent_gemini_times_out_with_partial_statuses() {
     {
         let mut config = (*turn.config).clone();
         config.multi_agent_v2.min_wait_timeout_ms = 0;
-        config.multi_agent_v2.max_wait_timeout_ms = 10_000;
+        config.multi_agent_v2.max_wait_timeout_ms = 200;
         config.multi_agent_v2.default_wait_timeout_ms = 1;
         let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
         set_turn_config(turn, config);

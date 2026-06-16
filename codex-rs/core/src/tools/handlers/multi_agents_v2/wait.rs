@@ -22,6 +22,17 @@ use tokio::time::sleep_until;
 use tokio::time::timeout_at;
 
 pub(crate) const GEMINI_DEFAULT_MULTI_AGENT_V2_WAIT_TIMEOUT_MS: i64 = 120_000;
+pub(crate) const GEMINI_MULTI_AGENT_V2_WAIT_TIMEOUT_FLOOR_MS: i64 =
+    GEMINI_DEFAULT_MULTI_AGENT_V2_WAIT_TIMEOUT_MS;
+
+#[allow(clippy::manual_clamp)]
+pub(crate) fn floor_gemini_wait_timeout_ms(
+    timeout_ms: i64,
+    floor_ms: i64,
+    max_timeout_ms: i64,
+) -> i64 {
+    timeout_ms.max(floor_ms).min(max_timeout_ms)
+}
 
 pub(crate) fn effective_wait_agent_v2_timeout_options(
     config: &MultiAgentV2Config,
@@ -103,6 +114,17 @@ impl ToolExecutor<ToolInvocation> for Handler {
             Some(ms) => ms,
             None => default_timeout_ms,
         };
+        let use_status_output = self.output_mode == WaitAgentV2OutputMode::GeminiStatuses
+            && turn.provider.info().wire_api == WireApi::GeminiNative;
+        let effective_timeout_ms = if use_status_output {
+            floor_gemini_wait_timeout_ms(
+                timeout_ms,
+                GEMINI_MULTI_AGENT_V2_WAIT_TIMEOUT_FLOOR_MS,
+                max_timeout_ms,
+            )
+        } else {
+            timeout_ms
+        };
 
         let mut mailbox_rx = session.input_queue.subscribe_mailbox().await;
 
@@ -120,9 +142,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
             )
             .await;
 
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        let use_status_output = self.output_mode == WaitAgentV2OutputMode::GeminiStatuses
-            && turn.provider.info().wire_api == WireApi::GeminiNative;
+        let deadline = Instant::now() + Duration::from_millis(effective_timeout_ms as u64);
         if !use_status_output {
             let timed_out = !wait_for_mailbox_change(&mut mailbox_rx, deadline).await;
             let result = WaitAgentResult::from_timed_out(timed_out);
