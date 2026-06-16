@@ -49,6 +49,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
         concurrency_wording: ConcurrencyWording::Raw,
+        fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -83,6 +84,14 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
     assert!(properties.contains_key("fork_turns"));
+    assert_eq!(
+        properties
+            .get("fork_turns")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        )
+    );
     assert!(!properties.contains_key("items"));
     assert!(!properties.contains_key("fork_context"));
     assert_eq!(
@@ -112,6 +121,37 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
 }
 
 #[test]
+fn spawn_agent_tool_v2_can_describe_gemini_scoped_fork_default() {
+    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+        available_models: Vec::new(),
+        agent_type_description: "role help".to_string(),
+        hide_agent_type_model_reasoning: false,
+        include_usage_hint: true,
+        usage_hint_text: None,
+        max_concurrent_threads_per_session: None,
+        concurrency_wording: ConcurrencyWording::Raw,
+        fork_turns_default_wording: ForkTurnsDefaultWording::GeminiScoped,
+    });
+
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = tool else {
+        panic!("spawn_agent should be a function tool");
+    };
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("spawn_agent should use object params");
+
+    assert_eq!(
+        properties
+            .get("fork_turns")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Optional number of turns to fork. Defaults to `none` on Gemini (no parent history is inherited). Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        )
+    );
+}
+
+#[test]
 fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: Vec::new(),
@@ -121,6 +161,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: None,
         concurrency_wording: ConcurrencyWording::Raw,
+        fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
     let ToolSpec::Namespace(namespace) = tool else {
@@ -174,6 +215,7 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
         concurrency_wording: ConcurrencyWording::Raw,
+        fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
     let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
@@ -199,6 +241,7 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
         concurrency_wording: ConcurrencyWording::Raw,
+        fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
     let ToolSpec::Function(ResponsesApiTool {

@@ -34,6 +34,16 @@ pub enum ConcurrencyWording {
     GeminiEffective,
 }
 
+/// Selects how the `fork_turns` parameter description reports its omitted-field default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ForkTurnsDefaultWording {
+    /// Surface the OpenAI/Responses default: omitted `fork_turns` means full history.
+    #[default]
+    FullHistory,
+    /// Gemini: omitted `fork_turns` starts the child without inherited parent history.
+    GeminiScoped,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SpawnAgentToolOptions {
     pub available_models: Vec<ModelPreset>,
@@ -43,6 +53,7 @@ pub struct SpawnAgentToolOptions {
     pub usage_hint_text: Option<String>,
     pub max_concurrent_threads_per_session: Option<usize>,
     pub concurrency_wording: ConcurrencyWording,
+    pub fork_turns_default_wording: ForkTurnsDefaultWording,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +110,10 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         .then(|| spawn_agent_models_description(&options.available_models));
     let inherited_model_guidance =
         (!options.hide_agent_type_model_reasoning).then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
-    let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
+    let mut properties = spawn_agent_common_properties_v2(
+        &options.agent_type_description,
+        options.fork_turns_default_wording,
+    );
     if options.hide_agent_type_model_reasoning {
         hide_spawn_agent_metadata_options(&mut properties);
     }
@@ -663,11 +677,27 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
-fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn fork_turns_description(fork_turns_default_wording: ForkTurnsDefaultWording) -> &'static str {
+    match fork_turns_default_wording {
+        ForkTurnsDefaultWording::FullHistory => {
+            "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        }
+        ForkTurnsDefaultWording::GeminiScoped => {
+            "Optional number of turns to fork. Defaults to `none` on Gemini (no parent history is inherited). Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        }
+    }
+}
+
+fn spawn_agent_common_properties_v2(
+    agent_type_description: &str,
+    fork_turns_default_wording: ForkTurnsDefaultWording,
+) -> BTreeMap<String, JsonSchema> {
     BTreeMap::from([
         (
             "message".to_string(),
-            JsonSchema::string(Some("Initial plain-text task for the new agent.".to_string())),
+            JsonSchema::string(Some(
+                "Initial plain-text task for the new agent.".to_string(),
+            )),
         ),
         (
             "agent_type".to_string(),
@@ -676,15 +706,12 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "fork_turns".to_string(),
             JsonSchema::string(Some(
-                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
-                    .to_string(),
+                fork_turns_description(fork_turns_default_wording).to_string(),
             )),
         ),
         (
             "model".to_string(),
-            JsonSchema::string(Some(
-                SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION.to_string(),
-            )),
+            JsonSchema::string(Some(SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION.to_string())),
         ),
         (
             "reasoning_effort".to_string(),

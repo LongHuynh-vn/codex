@@ -43,6 +43,7 @@ use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::ConcurrencyWording;
+use crate::tools::handlers::multi_agents_spec::ForkTurnsDefaultWording;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
@@ -762,6 +763,13 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                         } else {
                             ConcurrencyWording::Raw
                         },
+                        fork_turns_default_wording: if turn_context.provider.info().wire_api
+                            == WireApi::GeminiNative
+                        {
+                            ForkTurnsDefaultWording::GeminiScoped
+                        } else {
+                            ForkTurnsDefaultWording::FullHistory
+                        },
                     }),
                     tool_namespace,
                 ),
@@ -820,6 +828,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                         turn_context,
                     ),
                     concurrency_wording: ConcurrencyWording::Raw,
+                    fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
                 }),
                 exposure,
             );

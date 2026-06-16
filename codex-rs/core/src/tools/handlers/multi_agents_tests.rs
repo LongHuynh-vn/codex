@@ -506,8 +506,15 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_defaults_to_full_fork_and_rejects_child_model_overrides() {
+async fn multi_agent_v2_spawn_non_gemini_defaults_to_full_fork_and_rejects_child_model_overrides() {
     let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    use_bedrock_provider(&mut turn);
     let manager = thread_manager();
     let root = manager
         .start_thread((*turn.config).clone())
@@ -515,12 +522,6 @@ async fn multi_agent_v2_spawn_defaults_to_full_fork_and_rejects_child_model_over
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    set_turn_config(&mut turn, config);
 
     let err = SpawnAgentHandlerV2::default()
         .handle(invocation(
@@ -544,6 +545,102 @@ async fn multi_agent_v2_spawn_defaults_to_full_fork_and_rejects_child_model_over
             "Full-history forked agents inherit the parent agent type, model, and reasoning effort; omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.".to_string(),
         )
     );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_gemini_default_omitted_or_empty_fork_turns_is_scoped() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let parent_marker = "parent history marker must not reach Gemini default-scoped children";
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    use_gemini_provider(&mut turn);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    root.thread
+        .inject_user_message_without_turn(parent_marker.to_string())
+        .await;
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    for (task_name, fork_turns) in [
+        ("gemini_default_omitted", None),
+        ("gemini_default_empty", Some("   ")),
+    ] {
+        let child_message = format!("inspect this repo for {task_name}");
+        let mut args = json!({
+            "message": child_message.clone(),
+            "task_name": task_name,
+            "model": "gpt-5.4",
+            "reasoning_effort": "low",
+        });
+        if let Some(fork_turns) = fork_turns {
+            args["fork_turns"] = json!(fork_turns);
+        }
+
+        let output = SpawnAgentHandlerV2::default()
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(args),
+            ))
+            .await
+            .expect("Gemini omitted or empty fork_turns should spawn without a full-history fork");
+        let (content, _) = expect_text_output(output);
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let child_thread_id = session
+            .services
+            .agent_control
+            .resolve_agent_reference(
+                session.thread_id,
+                &turn.session_source,
+                result.task_name.as_str(),
+            )
+            .await
+            .expect("spawned task name should resolve");
+        let child_thread = manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("spawned child thread should exist");
+        let snapshot = child_thread.config_snapshot().await;
+        assert_eq!(snapshot.model, "gpt-5.4");
+        assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Low));
+
+        let child_history = child_thread.codex.session.clone_history().await;
+        let child_history_json =
+            serde_json::to_string(child_history.raw_items()).expect("serialize child history");
+        assert!(
+            !child_history_json.contains(parent_marker),
+            "Gemini default-scoped child must not inherit parent history for {task_name}: {child_history_json}"
+        );
+        assert!(manager.captured_ops().iter().any(|(id, op)| {
+            *id == child_thread_id
+                && matches!(
+                    op,
+                    Op::InterAgentCommunication { communication }
+                        if communication.author == AgentPath::root()
+                            && communication.recipient.as_str() == result.task_name.as_str()
+                            && communication.other_recipients.is_empty()
+                            && communication.content == child_message
+                            && communication.trigger_turn
+                )
+        }));
+    }
 }
 
 #[tokio::test]
@@ -1006,7 +1103,8 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
             function_payload(json!({
                 "message": "inspect this repo",
                 "task_name": "fork_with_tier",
-                "service_tier": ServiceTier::Fast.request_value()
+                "service_tier": ServiceTier::Fast.request_value(),
+                "fork_turns": "all"
             })),
         ))
         .await

@@ -1123,10 +1123,11 @@ async fn gemini_spawn_agent_description_states_effective_concurrency_but_non_gem
         });
     })
     .await;
-    let gemini_description = match gemini.visible_spec("spawn_agent") {
-        ToolSpec::Function(tool) => tool.description.as_str(),
+    let gemini_spawn_agent = match gemini.visible_spec("spawn_agent") {
+        ToolSpec::Function(tool) => tool,
         other => panic!("expected spawn_agent function spec on Gemini, got {other:?}"),
     };
+    let gemini_description = gemini_spawn_agent.description.as_str();
     assert!(
         gemini_description.contains("spawn at most 3 sub-agents"),
         "Gemini spawn_agent must advertise the effective count (cap - 1): {gemini_description:?}"
@@ -1139,6 +1140,19 @@ async fn gemini_spawn_agent_description_states_effective_concurrency_but_non_gem
         !gemini_description.contains("max_concurrent_threads_per_session = 4"),
         "Gemini spawn_agent must not present the raw cap as the spawnable count: {gemini_description:?}"
     );
+    let gemini_properties = gemini_spawn_agent
+        .parameters
+        .properties
+        .as_ref()
+        .expect("spawn_agent should use object params");
+    assert_eq!(
+        gemini_properties
+            .get("fork_turns")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Optional number of turns to fork. Defaults to `none` on Gemini (no parent history is inherited). Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        )
+    );
 
     // Non-Gemini (Bedrock / WireApi::Responses): the raw cap wording is preserved
     // byte-for-byte and the Gemini effective-count phrasing must not leak in.
@@ -1150,10 +1164,11 @@ async fn gemini_spawn_agent_description_states_effective_concurrency_but_non_gem
         });
     })
     .await;
-    let non_gemini_description = match non_gemini.visible_spec("spawn_agent") {
-        ToolSpec::Function(tool) => tool.description.as_str(),
+    let non_gemini_spawn_agent = match non_gemini.visible_spec("spawn_agent") {
+        ToolSpec::Function(tool) => tool,
         other => panic!("expected spawn_agent function spec on Bedrock, got {other:?}"),
     };
+    let non_gemini_description = non_gemini_spawn_agent.description.as_str();
     assert!(
         non_gemini_description.contains("`max_concurrent_threads_per_session = 4`"),
         "non-Gemini spawn_agent must keep the raw cap wording: {non_gemini_description:?}"
@@ -1161,6 +1176,19 @@ async fn gemini_spawn_agent_description_states_effective_concurrency_but_non_gem
     assert!(
         !non_gemini_description.contains("reserved for `/root`"),
         "non-Gemini spawn_agent must not include the Gemini effective-count phrase: {non_gemini_description:?}"
+    );
+    let non_gemini_properties = non_gemini_spawn_agent
+        .parameters
+        .properties
+        .as_ref()
+        .expect("spawn_agent should use object params");
+    assert_eq!(
+        non_gemini_properties
+            .get("fork_turns")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+        )
     );
 }
 
