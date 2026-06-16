@@ -35,6 +35,58 @@ fn assistant_output_text(text: &str) -> ResponseItem {
     }
 }
 
+#[test]
+fn effective_turn_last_agent_message_uses_fallback_for_gemini_spawned_subagent() {
+    assert_eq!(
+        effective_turn_last_agent_message(
+            WireApi::GeminiNative,
+            /*is_spawned_subagent*/ true,
+            /*terminal_last_agent_message*/ None,
+            Some("report".to_string())
+        ),
+        Some("report".to_string())
+    );
+}
+
+#[test]
+fn effective_turn_last_agent_message_keeps_gemini_root_terminal_value() {
+    assert_eq!(
+        effective_turn_last_agent_message(
+            WireApi::GeminiNative,
+            /*is_spawned_subagent*/ false,
+            /*terminal_last_agent_message*/ None,
+            Some("report".to_string())
+        ),
+        None
+    );
+}
+
+#[test]
+fn effective_turn_last_agent_message_keeps_non_gemini_terminal_value() {
+    assert_eq!(
+        effective_turn_last_agent_message(
+            WireApi::Responses,
+            /*is_spawned_subagent*/ true,
+            /*terminal_last_agent_message*/ None,
+            Some("report".to_string())
+        ),
+        None
+    );
+}
+
+#[test]
+fn effective_turn_last_agent_message_prefers_terminal_value() {
+    assert_eq!(
+        effective_turn_last_agent_message(
+            WireApi::GeminiNative,
+            /*is_spawned_subagent*/ true,
+            Some("final".to_string()),
+            Some("report".to_string())
+        ),
+        Some("final".to_string())
+    );
+}
+
 #[tokio::test]
 async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;

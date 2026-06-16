@@ -74,6 +74,7 @@ use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_git_repo_root_with_fs;
+use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ServiceTier;
@@ -95,6 +96,8 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -192,6 +195,11 @@ pub(crate) async fn run_turn(
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
 
     let mut last_agent_message: Option<String> = None;
+    let mut last_non_empty_sampling_request_last_agent_message: Option<String> = None;
+    let is_spawned_subagent = matches!(
+        &turn_context.session_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+    );
     let mut stop_hook_active = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
@@ -260,6 +268,10 @@ pub(crate) async fn run_turn(
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
                 } = sampling_request_output;
+                if sampling_request_last_agent_message.is_some() {
+                    last_non_empty_sampling_request_last_agent_message =
+                        sampling_request_last_agent_message.clone();
+                }
                 can_drain_pending_input = true;
                 let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
@@ -321,7 +333,12 @@ pub(crate) async fn run_turn(
                 }
 
                 if !needs_follow_up {
-                    last_agent_message = sampling_request_last_agent_message;
+                    last_agent_message = effective_turn_last_agent_message(
+                        turn_context.provider.info().wire_api,
+                        is_spawned_subagent,
+                        sampling_request_last_agent_message,
+                        last_non_empty_sampling_request_last_agent_message.clone(),
+                    );
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
                         &turn_context,
@@ -1191,6 +1208,22 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+}
+
+fn effective_turn_last_agent_message(
+    wire_api: WireApi,
+    is_spawned_subagent: bool,
+    terminal_last_agent_message: Option<String>,
+    fallback_last_agent_message: Option<String>,
+) -> Option<String> {
+    if wire_api == WireApi::GeminiNative
+        && is_spawned_subagent
+        && terminal_last_agent_message.is_none()
+    {
+        fallback_last_agent_message
+    } else {
+        terminal_last_agent_message
+    }
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.

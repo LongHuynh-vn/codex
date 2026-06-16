@@ -1068,6 +1068,8 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
     // Distinctive substrings of the Gemini-gated `GEMINI_MULTI_AGENT_V2_USAGE_HINT` hint.
     const NEW_GUIDANCE: &str = "spawn one bounded sub-agent per part";
     const WAIT_SENTENCE: &str = "keep calling `wait_agent`";
+    const FINAL_CHANNEL_SENTENCE: &str =
+        "deliver your complete result as your final-channel plain-text message";
 
     let gemini = probe(|turn| {
         use_gemini_provider(turn);
@@ -1085,6 +1087,10 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
     assert!(
         gemini_description.contains(NEW_GUIDANCE),
         "Gemini spawn_agent must include when-to-delegate guidance: {gemini_description:?}"
+    );
+    assert!(
+        gemini_description.contains(FINAL_CHANNEL_SENTENCE),
+        "Gemini spawn_agent must include final-channel delivery guidance: {gemini_description:?}"
     );
 
     // The default test-harness provider is environment-dependent
@@ -1108,6 +1114,10 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
     assert!(
         !non_gemini_specs_json.contains(WAIT_SENTENCE),
         "non-Gemini providers must not include the Gemini usage hint: {non_gemini_specs_json}"
+    );
+    assert!(
+        !non_gemini_specs_json.contains(FINAL_CHANNEL_SENTENCE),
+        "non-Gemini providers must not include Gemini final-channel guidance: {non_gemini_specs_json}"
     );
 }
 
