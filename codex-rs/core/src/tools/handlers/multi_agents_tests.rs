@@ -1,8 +1,10 @@
 use super::*;
+use crate::StateDbHandle;
 use crate::ThreadManager;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
+use crate::goals::GoalRuntimeEvent;
 use crate::init_state_db;
 use crate::session::TurnInput;
 use crate::session::tests::make_session_and_context;
@@ -13,6 +15,7 @@ use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::UpdateGoalHandler;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
@@ -60,6 +63,7 @@ use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
@@ -175,6 +179,109 @@ fn use_gemini_provider(turn: &mut TurnContext) {
     config.model_provider = provider_info.clone();
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
     turn.config = Arc::new(config);
+}
+
+enum AutoGoalProvider {
+    Gemini,
+    Bedrock,
+}
+
+struct AutoGoalSpawnSetup {
+    _manager: ThreadManager,
+    session: Arc<crate::session::session::Session>,
+    turn: Arc<TurnContext>,
+    state_db: StateDbHandle,
+}
+
+async fn auto_goal_spawn_setup<F>(
+    provider: AutoGoalProvider,
+    session_source: F,
+    first_user_message: Option<&str>,
+) -> AutoGoalSpawnSetup
+where
+    F: FnOnce(ThreadId) -> SessionSource,
+{
+    let (_session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    for feature in [Feature::MultiAgentV2, Feature::Goals, Feature::Sqlite] {
+        config
+            .features
+            .enable(feature)
+            .expect("test config should allow feature update");
+    }
+    set_turn_config(&mut turn, config);
+    match provider {
+        AutoGoalProvider::Gemini => use_gemini_provider(&mut turn),
+        AutoGoalProvider::Bedrock => use_bedrock_provider(&mut turn),
+    }
+    let config = (*turn.config).clone();
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state db should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let root = manager
+        .start_thread(config)
+        .await
+        .expect("root thread should start");
+    if let Some(first_user_message) = first_user_message {
+        root.thread
+            .inject_user_message_without_turn(first_user_message.to_string())
+            .await;
+        root.thread
+            .codex
+            .session
+            .flush_rollout()
+            .await
+            .expect("rollout should flush");
+    }
+
+    let session = root.thread.codex.session.clone();
+    let mut turn = session.new_default_turn().await;
+    Arc::get_mut(&mut turn)
+        .expect("fresh turn should be unique")
+        .session_source = session_source(root.thread_id);
+
+    AutoGoalSpawnSetup {
+        _manager: manager,
+        session,
+        turn,
+        state_db,
+    }
+}
+
+async fn spawn_agent_v2_for_auto_goal(setup: &AutoGoalSpawnSetup, task_name: &str) {
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            setup.session.clone(),
+            setup.turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": format!("inspect this repo for {task_name}"),
+                "task_name": task_name,
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+}
+
+fn thread_spawn_source_for_test(
+    parent_thread_id: ThreadId,
+    agent_path: Option<AgentPath>,
+) -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path,
+        agent_nickname: None,
+        agent_role: None,
+    })
 }
 
 #[test]
@@ -659,6 +766,189 @@ async fn multi_agent_v2_spawn_gemini_default_omitted_or_empty_fork_turns_is_scop
                 )
         }));
     }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_gemini_root_auto_arms_goal_once() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("  Review   all worker results  "),
+    )
+    .await;
+
+    spawn_agent_v2_for_auto_goal(&setup, "worker_a").await;
+
+    let goal = setup
+        .state_db
+        .thread_goals()
+        .get_thread_goal(setup.session.thread_id)
+        .await
+        .expect("thread goal read should succeed")
+        .expect("Gemini root spawn should auto-arm a goal");
+    assert_eq!(goal.objective, "Review all worker results");
+    assert_eq!(goal.status, codex_state::ThreadGoalStatus::Active);
+    assert_eq!(goal.token_budget, Some(250_000));
+
+    spawn_agent_v2_for_auto_goal(&setup, "worker_b").await;
+
+    let goal_after_second_spawn = setup
+        .state_db
+        .thread_goals()
+        .get_thread_goal(setup.session.thread_id)
+        .await
+        .expect("thread goal read should succeed");
+    assert_eq!(goal_after_second_spawn, Some(goal));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_non_gemini_does_not_auto_arm_goal() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Bedrock,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+
+    spawn_agent_v2_for_auto_goal(&setup, "worker").await;
+
+    assert_eq!(
+        None,
+        setup
+            .session
+            .get_thread_goal()
+            .await
+            .expect("thread goal read should succeed")
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_gemini_auto_goal_respects_root_source_gate() {
+    let cases = [
+        (
+            "internal",
+            SessionSource::Internal(InternalSessionSource::MemoryConsolidation),
+            false,
+        ),
+        (
+            "subagent_no_agent_path",
+            thread_spawn_source_for_test(ThreadId::new(), /*agent_path*/ None),
+            false,
+        ),
+        (
+            "subagent_root_agent_path",
+            thread_spawn_source_for_test(ThreadId::new(), Some(AgentPath::root())),
+            true,
+        ),
+        (
+            "subagent_non_root_agent_path",
+            thread_spawn_source_for_test(
+                ThreadId::new(),
+                Some(AgentPath::try_from("/root/child").expect("valid agent path")),
+            ),
+            false,
+        ),
+    ];
+
+    for (label, session_source, expect_goal) in cases {
+        let setup = auto_goal_spawn_setup(
+            AutoGoalProvider::Gemini,
+            |_| session_source,
+            /*first_user_message*/ None,
+        )
+        .await;
+
+        spawn_agent_v2_for_auto_goal(&setup, label).await;
+
+        let goal = setup
+            .session
+            .get_thread_goal()
+            .await
+            .expect("thread goal read should succeed");
+        assert_eq!(goal.is_some(), expect_goal, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_gemini_auto_goal_complete_stops_idle_continuation() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    spawn_agent_v2_for_auto_goal(&setup, "worker").await;
+
+    UpdateGoalHandler
+        .handle(invocation(
+            setup.session.clone(),
+            setup.turn.clone(),
+            "update_goal",
+            function_payload(json!({"status": "complete"})),
+        ))
+        .await
+        .expect("update_goal should mark the auto-goal complete");
+
+    let goal = setup
+        .session
+        .get_thread_goal()
+        .await
+        .expect("thread goal read should succeed")
+        .expect("auto-goal should remain persisted");
+    assert_eq!(
+        goal.status,
+        codex_protocol::protocol::ThreadGoalStatus::Complete
+    );
+
+    setup
+        .session
+        .goal_runtime_apply(GoalRuntimeEvent::MaybeContinueIfIdle)
+        .await
+        .expect("idle goal runtime should apply");
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_gemini_auto_goal_budget_limit_stops_idle_continuation() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    spawn_agent_v2_for_auto_goal(&setup, "worker").await;
+
+    setup
+        .state_db
+        .thread_goals()
+        .account_thread_goal_usage(
+            setup.session.thread_id,
+            /*time_delta_seconds*/ 0,
+            /*token_delta*/ 250_000,
+            codex_state::GoalAccountingMode::ActiveOnly,
+            /*expected_goal_id*/ None,
+        )
+        .await
+        .expect("goal accounting should apply");
+
+    let goal = setup
+        .session
+        .get_thread_goal()
+        .await
+        .expect("thread goal read should succeed")
+        .expect("auto-goal should remain persisted");
+    assert_eq!(
+        goal.status,
+        codex_protocol::protocol::ThreadGoalStatus::BudgetLimited
+    );
+    assert_eq!(goal.tokens_used, 250_000);
+
+    setup
+        .session
+        .goal_runtime_apply(GoalRuntimeEvent::MaybeContinueIfIdle)
+        .await
+        .expect("idle goal runtime should apply");
+    assert!(setup.session.active_turn.lock().await.is_none());
 }
 
 #[tokio::test]

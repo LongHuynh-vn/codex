@@ -5,14 +5,26 @@ use crate::agent::control::render_input_preview;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
+use crate::goals::CreateGoalRequest;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_model_provider_info::WireApi;
 use codex_protocol::AgentPath;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionSource;
 use codex_tools::ToolSpec;
+use std::sync::Arc;
+
+const GEMINI_ORCHESTRATION_AUTO_GOAL_TOKEN_BUDGET: i64 = 250_000;
+const GEMINI_ORCHESTRATION_AUTO_GOAL_FALLBACK_OBJECTIVE: &str =
+    "Complete the user's delegated multi-agent task and deliver one consolidated final report.";
 
 #[derive(Default)]
 pub(crate) struct Handler {
@@ -55,7 +67,8 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let default_fork_scope = if turn.provider.info().wire_api == WireApi::GeminiNative {
+    let is_gemini_native = turn.provider.info().wire_api == WireApi::GeminiNative;
+    let default_fork_scope = if is_gemini_native {
         DefaultForkScope::NoHistory
     } else {
         DefaultForkScope::FullHistory
@@ -216,6 +229,9 @@ async fn handle_spawn_agent(
         )
         .await;
     let _ = result?;
+    if is_gemini_native {
+        maybe_auto_arm_gemini_orchestration_goal(&session, turn.as_ref()).await;
+    }
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
@@ -237,6 +253,116 @@ async fn handle_spawn_agent(
             nickname,
         })
     }
+}
+
+async fn maybe_auto_arm_gemini_orchestration_goal(session: &Arc<Session>, turn: &TurnContext) {
+    if !is_root_orchestrator_source(&turn.session_source) {
+        return;
+    }
+
+    match session.get_thread_goal().await {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(err) => {
+            tracing::debug!(
+                "skipping Gemini orchestration auto-goal because goal state is unavailable: {err}"
+            );
+            return;
+        }
+    }
+
+    let objective = gemini_orchestration_auto_goal_objective(session.as_ref()).await;
+    if let Err(err) = session
+        .create_thread_goal(
+            turn,
+            CreateGoalRequest {
+                objective,
+                token_budget: Some(GEMINI_ORCHESTRATION_AUTO_GOAL_TOKEN_BUDGET),
+            },
+        )
+        .await
+    {
+        if err
+            .chain()
+            .any(|cause| cause.to_string().contains("already has a goal"))
+        {
+            tracing::debug!(
+                "skipping Gemini orchestration auto-goal because a goal already exists"
+            );
+        } else {
+            tracing::debug!("failed to auto-arm Gemini orchestration goal: {err}");
+        }
+    }
+}
+
+fn is_root_orchestrator_source(session_source: &SessionSource) -> bool {
+    match session_source {
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Custom(_)
+        | SessionSource::Unknown => true,
+        SessionSource::SubAgent(_) => match session_source.get_agent_path() {
+            Some(path) => path.is_root(),
+            None => false,
+        },
+        SessionSource::Internal(_) => false,
+    }
+}
+
+async fn gemini_orchestration_auto_goal_objective(session: &Session) -> String {
+    if let Some(live_thread) = session.live_thread() {
+        match live_thread
+            .read_thread(
+                /*include_archived*/ true, /*include_history*/ true,
+            )
+            .await
+        {
+            Ok(thread) => {
+                if let Some(objective) =
+                    normalized_goal_objective(thread.first_user_message.as_deref())
+                {
+                    return objective;
+                }
+                if let Some(objective) = normalized_goal_objective(Some(thread.preview.as_str())) {
+                    return objective;
+                }
+                if let Some(objective) = thread.history.as_ref().and_then(|history| {
+                    let content = history.items.iter().find_map(|item| match item {
+                        RolloutItem::ResponseItem(ResponseItem::Message {
+                            role, content, ..
+                        }) if role == "user" => Some(content.as_slice()),
+                        _ => None,
+                    })?;
+                    let text = crate::content_items_to_text(content)?;
+                    normalized_goal_objective(Some(text.as_str()))
+                }) {
+                    return objective;
+                }
+            }
+            Err(err) => {
+                tracing::debug!(
+                    "failed to read thread metadata for Gemini orchestration auto-goal: {err}"
+                );
+            }
+        }
+    }
+
+    GEMINI_ORCHESTRATION_AUTO_GOAL_FALLBACK_OBJECTIVE.to_string()
+}
+
+fn normalized_goal_objective(value: Option<&str>) -> Option<String> {
+    let normalized = value?.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(
+        normalized
+            .chars()
+            .take(MAX_THREAD_GOAL_OBJECTIVE_CHARS)
+            .collect(),
+    )
 }
 
 impl CoreToolRuntime for Handler {
