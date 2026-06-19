@@ -511,6 +511,82 @@ fn agent_result_edge_links_child_result_to_parent_notification() -> anyhow::Resu
 }
 
 #[test]
+fn agent_result_edge_links_child_result_to_clean_parent_notification() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let writer = create_started_agent_writer(&temp)?;
+    start_thread(
+        &writer,
+        "019d0000-0000-7000-8000-000000000002",
+        "/root/child",
+    )?;
+    start_turn_for_thread(
+        &writer,
+        "019d0000-0000-7000-8000-000000000002",
+        "turn-child-1",
+    )?;
+    append_completed_inference(
+        &writer,
+        "019d0000-0000-7000-8000-000000000002",
+        "turn-child-1",
+        "inference-child-1",
+        vec![message("assistant", "task")],
+        vec![message("assistant", "done")],
+    )?;
+
+    let notification = "<subagent_notification>\n{\"agent_path\":\"/root/child\",\"status\":{\"completed\":\"done\"}}\n</subagent_notification>";
+    let carried_payload = writer.write_json_payload(
+        RawPayloadKind::AgentResult,
+        &json!({
+            "child_agent_path": "/root/child",
+            "message": notification,
+            "status": {"completed": "done"}
+        }),
+    )?;
+    writer.append_with_context(
+        trace_context_for_thread("019d0000-0000-7000-8000-000000000002", "turn-child-1"),
+        RawTraceEventPayload::AgentResultObserved {
+            edge_id: "edge:agent_result:thread-child:turn-child-1:thread-root".to_string(),
+            child_thread_id: "019d0000-0000-7000-8000-000000000002".to_string(),
+            child_codex_turn_id: "turn-child-1".to_string(),
+            parent_thread_id: "019d0000-0000-7000-8000-000000000001".to_string(),
+            message: notification.to_string(),
+            carried_payload: Some(carried_payload.clone()),
+        },
+    )?;
+
+    start_agent_turn(&writer, "turn-root-1")?;
+    append_inference_request(
+        &writer,
+        "019d0000-0000-7000-8000-000000000001",
+        "turn-root-1",
+        "inference-root-1",
+        vec![json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": notification}],
+            "phase": "commentary"
+        })],
+    )?;
+
+    let replayed = replay_bundle(temp.path())?;
+    let edge =
+        &replayed.interaction_edges["edge:agent_result:thread-child:turn-child-1:thread-root"];
+    assert_eq!(edge.kind, InteractionEdgeKind::AgentResult);
+    let target_item_id = target_conversation_item_id(&edge.target);
+    assert_eq!(
+        text_body(&replayed.conversation_items[target_item_id]),
+        notification
+    );
+    assert_eq!(edge.carried_item_ids, vec![target_item_id.clone()]);
+    assert_eq!(
+        edge.carried_raw_payload_ids,
+        vec![carried_payload.raw_payload_id]
+    );
+
+    Ok(())
+}
+
+#[test]
 fn agent_result_edge_falls_back_to_child_thread_without_result_message() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let writer = create_started_agent_writer(&temp)?;

@@ -1,3 +1,6 @@
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
 
 use super::ContextualUserFragment;
@@ -14,6 +17,25 @@ impl SubagentNotification {
             agent_reference: agent_reference.into(),
             status,
         }
+    }
+
+    pub(crate) fn matches_clean_response_item(item: &ResponseItem) -> bool {
+        let ResponseItem::Message {
+            role,
+            content,
+            phase,
+            ..
+        } = item
+        else {
+            return false;
+        };
+        let [ContentItem::OutputText { text }] = content.as_slice() else {
+            return false;
+        };
+
+        role == "assistant"
+            && matches!(phase, Some(MessagePhase::Commentary))
+            && Self::matches_text(text)
     }
 }
 

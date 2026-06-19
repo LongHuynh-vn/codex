@@ -1,6 +1,11 @@
+use crate::context::ContextualUserFragment;
+use crate::context::SubagentNotification;
 use crate::state::ActiveTurn;
 use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
+use codex_model_provider_info::WireApi;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::user_input::UserInput;
@@ -8,6 +13,25 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
+
+fn mailbox_communication_to_response_item(
+    mail: InterAgentCommunication,
+    wire_api: WireApi,
+) -> ResponseItem {
+    if wire_api == WireApi::GeminiNative
+        && mail.trigger_turn
+        && SubagentNotification::matches_text(&mail.content)
+    {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText { text: mail.content }],
+            phase: Some(MessagePhase::Commentary),
+        }
+    } else {
+        ResponseItem::from(mail.to_response_input_item())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TurnInput {
@@ -70,12 +94,12 @@ impl InputQueue {
             .any(|mail| mail.trigger_turn)
     }
 
-    pub(crate) async fn drain_mailbox_input_items(&self) -> Vec<ResponseItem> {
+    pub(crate) async fn drain_mailbox_input_items(&self, wire_api: WireApi) -> Vec<ResponseItem> {
         self.mailbox_pending_mails
             .lock()
             .await
             .drain(..)
-            .map(|mail| ResponseItem::from(mail.to_response_input_item()))
+            .map(|mail| mailbox_communication_to_response_item(mail, wire_api))
             .collect()
     }
 
@@ -172,6 +196,7 @@ impl InputQueue {
     pub(crate) async fn get_pending_input(
         &self,
         active_turn: &Mutex<Option<ActiveTurn>>,
+        wire_api: WireApi,
     ) -> Vec<TurnInput> {
         let (pending_input, accepts_mailbox_delivery) = {
             let mut active = active_turn.lock().await;
@@ -190,7 +215,7 @@ impl InputQueue {
             return pending_input;
         }
         let mailbox_items = self
-            .drain_mailbox_input_items()
+            .drain_mailbox_input_items(wire_api)
             .await
             .into_iter()
             .map(TurnInput::ResponseItem);
@@ -301,13 +326,84 @@ mod tests {
             .await;
 
         assert_eq!(
-            input_queue.drain_mailbox_input_items().await,
+            input_queue
+                .drain_mailbox_input_items(WireApi::Responses)
+                .await,
             vec![
                 ResponseItem::from(mail_one.to_response_input_item()),
                 ResponseItem::from(mail_two.to_response_input_item())
             ]
         );
         assert!(!input_queue.has_pending_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn input_queue_drains_gemini_notification_as_clean_commentary() {
+        let input_queue = InputQueue::new();
+        let notification = crate::session_prefix::format_subagent_notification_message(
+            "/root/worker",
+            &codex_protocol::protocol::AgentStatus::Completed(Some("report".to_string())),
+        );
+        let mail = make_mail(
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            AgentPath::root(),
+            &notification,
+            /*trigger_turn*/ true,
+        );
+
+        input_queue
+            .enqueue_mailbox_communication(mail.clone())
+            .await;
+
+        assert_eq!(
+            input_queue
+                .drain_mailbox_input_items(WireApi::GeminiNative)
+                .await,
+            vec![ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text: notification }],
+                phase: Some(MessagePhase::Commentary),
+            }]
+        );
+        assert!(!input_queue.has_pending_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn input_queue_preserves_other_gemini_envelopes() {
+        let input_queue = InputQueue::new();
+        let queue_only_notification = make_mail(
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            AgentPath::root(),
+            &crate::session_prefix::format_subagent_notification_message(
+                "/root/worker",
+                &codex_protocol::protocol::AgentStatus::Completed(Some("report".to_string())),
+            ),
+            /*trigger_turn*/ false,
+        );
+        let ordinary_mail = make_mail(
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            AgentPath::root(),
+            "ordinary inter-agent message",
+            /*trigger_turn*/ true,
+        );
+
+        input_queue
+            .enqueue_mailbox_communication(queue_only_notification.clone())
+            .await;
+        input_queue
+            .enqueue_mailbox_communication(ordinary_mail.clone())
+            .await;
+
+        assert_eq!(
+            input_queue
+                .drain_mailbox_input_items(WireApi::GeminiNative)
+                .await,
+            vec![
+                ResponseItem::from(queue_only_notification.to_response_input_item()),
+                ResponseItem::from(ordinary_mail.to_response_input_item()),
+            ]
+        );
     }
 
     #[tokio::test]

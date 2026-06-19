@@ -1,3 +1,4 @@
+use crate::context::SubagentNotification;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
@@ -749,11 +750,16 @@ pub(crate) fn is_user_turn_boundary(item: &ResponseItem) -> bool {
     };
 
     (role == "user" && !is_contextual_user_message_content(content))
-        || (role == "assistant" && is_inter_agent_instruction_content(content))
+        || (role == "assistant" && is_inter_agent_instruction_item(item))
 }
 
-fn is_inter_agent_instruction_content(content: &[ContentItem]) -> bool {
+fn is_inter_agent_instruction_item(item: &ResponseItem) -> bool {
+    let ResponseItem::Message { content, .. } = item else {
+        return false;
+    };
+
     InterAgentCommunication::is_message_content(content)
+        || SubagentNotification::matches_clean_response_item(item)
 }
 
 fn user_message_positions(items: &[ResponseItem]) -> Vec<usize> {

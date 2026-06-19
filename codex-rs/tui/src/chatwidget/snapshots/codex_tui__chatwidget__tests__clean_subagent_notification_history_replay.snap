@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests/history_replay.rs
+expression: combined
+---
+<subagent_notification>
+{"agent_path":"/root/task_rust","status":{"completed":"Found the bug and added regression coverage."}}
+</subagent_notification>

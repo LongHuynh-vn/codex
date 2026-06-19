@@ -77,6 +77,48 @@ async fn resumed_initial_messages_render_history() {
 }
 
 #[tokio::test]
+async fn clean_subagent_notification_history_replay_snapshot() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_raw_output_mode(/*enabled*/ true);
+    let notification = r#"<subagent_notification>
+{"agent_path":"/root/task_rust","status":{"completed":"Found the bug and added regression coverage."}}
+</subagent_notification>"#;
+
+    chat.replay_thread_item(
+        AppServerThreadItem::AgentMessage {
+            id: "subagent-notification".to_string(),
+            text: notification.to_string(),
+            phase: Some(MessagePhase::Commentary),
+            memory_citation: None,
+        },
+        "turn-1".to_string(),
+        ReplayKind::ThreadSnapshot,
+    );
+
+    let mut inserted = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            inserted.push(
+                cell.display_lines_for_mode(
+                    /*width*/ 80,
+                    history_cell::HistoryRenderMode::Raw,
+                ),
+            );
+        }
+    }
+    assert_eq!(inserted.len(), 1);
+    let combined = lines_to_single_string(&inserted[0]);
+    assert!(combined.contains("Found the bug and added regression coverage."));
+    for envelope_field in ["author", "recipient", "other_recipients", "trigger_turn"] {
+        assert!(
+            !combined.contains(envelope_field),
+            "clean notification should not render the {envelope_field} envelope field"
+        );
+    }
+    assert_chatwidget_snapshot!("clean_subagent_notification_history_replay", combined);
+}
+
+#[tokio::test]
 async fn replayed_user_messages_seed_composer_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.bottom_pane.set_history_metadata(

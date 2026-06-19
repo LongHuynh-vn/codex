@@ -2,6 +2,7 @@ use super::*;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::AgentPath;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -49,6 +50,19 @@ fn inter_agent_msg(text: &str, trigger_turn: bool) -> ResponseItem {
         trigger_turn,
     );
     communication.to_response_input_item().into()
+}
+
+fn clean_subagent_notification_msg(report: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: format!(
+                "<subagent_notification>\n{{\"agent_path\":\"/root/worker\",\"status\":{{\"completed\":\"{report}\"}}}}\n</subagent_notification>"
+            ),
+        }],
+        phase: Some(MessagePhase::Commentary),
+    }
 }
 
 #[test]
@@ -202,6 +216,24 @@ fn truncates_rollout_to_last_n_fork_turns_counts_trigger_turn_messages() {
 
     let truncated = truncate_rollout_to_last_n_fork_turns(&rollout, /*n_from_end*/ 2);
     let expected = rollout[4..].to_vec();
+
+    assert_eq!(
+        serde_json::to_value(&truncated).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+}
+
+#[test]
+fn truncates_rollout_to_last_n_fork_turns_counts_clean_subagent_notifications() {
+    let rollout = vec![
+        RolloutItem::ResponseItem(user_msg("u1")),
+        RolloutItem::ResponseItem(assistant_msg("a1")),
+        RolloutItem::ResponseItem(clean_subagent_notification_msg("worker report")),
+        RolloutItem::ResponseItem(assistant_msg("synthesized report")),
+    ];
+
+    let truncated = truncate_rollout_to_last_n_fork_turns(&rollout, /*n_from_end*/ 1);
+    let expected = rollout[2..].to_vec();
 
     assert_eq!(
         serde_json::to_value(&truncated).unwrap(),

@@ -12,6 +12,7 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::LocalShellStatus;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::openai_models::InputModality;
@@ -59,6 +60,19 @@ fn inter_agent_assistant_msg(text: &str) -> ResponseItem {
             text: serde_json::to_string(&communication).unwrap(),
         }],
         phase: None,
+    }
+}
+
+fn clean_subagent_notification_msg(report: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: format!(
+                "<subagent_notification>\n{{\"agent_path\":\"/root/worker\",\"status\":{{\"completed\":\"{report}\"}}}}\n</subagent_notification>"
+            ),
+        }],
+        phase: Some(MessagePhase::Commentary),
     }
 }
 
@@ -300,6 +314,13 @@ fn inter_agent_assistant_messages_are_turn_boundaries() {
 }
 
 #[test]
+fn clean_subagent_notifications_are_turn_boundaries() {
+    let item = clean_subagent_notification_msg("done");
+
+    assert!(is_user_turn_boundary(&item));
+}
+
+#[test]
 fn for_prompt_preserves_inter_agent_assistant_messages() {
     let item = inter_agent_assistant_msg("continue");
     let history = create_history_with_items(vec![item.clone()]);
@@ -319,6 +340,24 @@ fn drop_last_n_user_turns_treats_inter_agent_assistant_messages_as_instruction_t
         first_reply.clone(),
         inter_agent_turn,
         inter_agent_reply,
+    ]);
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.raw_items(), &vec![first_turn, first_reply]);
+}
+
+#[test]
+fn drop_last_n_user_turns_treats_clean_subagent_notifications_as_instruction_turns() {
+    let first_turn = user_input_text_msg("first");
+    let first_reply = assistant_msg("done");
+    let notification = clean_subagent_notification_msg("worker report");
+    let notification_reply = assistant_msg("synthesized report");
+    let mut history = create_history_with_items(vec![
+        first_turn.clone(),
+        first_reply.clone(),
+        notification,
+        notification_reply,
     ]);
 
     history.drop_last_n_user_turns(/*num_turns*/ 1);

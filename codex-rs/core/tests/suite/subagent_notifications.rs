@@ -1,14 +1,19 @@
+use super::gemini_native_phase2::gemini_builder as mock_gemini_builder;
+use super::gemini_native_phase2::gemini_text_sse;
+use super::gemini_native_phase2::mount_gemini_sse_sequence;
 use anyhow::Result;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -29,6 +34,7 @@ use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event_match;
@@ -800,6 +806,74 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
 
     let stop_inputs_after_internal = read_hook_log(test.codex_home_path(), "stop_hook_log.jsonl")?;
     assert_eq!(stop_inputs_after_internal.len(), stop_input_count);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_trigger_turn_subagent_notification_uses_clean_content() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder()).await?;
+    let requests = mount_gemini_sse_sequence(
+        harness.server(),
+        vec![gemini_text_sse("synthesized child report")],
+    )
+    .await;
+    let notification = concat!(
+        "<subagent_notification>\n",
+        r#"{"agent_path":"/root/worker","status":{"completed":"child report"}}"#,
+        "\n</subagent_notification>"
+    );
+
+    harness
+        .test()
+        .codex
+        .submit(Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                AgentPath::try_from("/root/worker").map_err(anyhow::Error::msg)?,
+                AgentPath::root(),
+                Vec::new(),
+                notification.to_string(),
+                /*trigger_turn*/ true,
+            ),
+        })
+        .await?;
+    wait_for_event_match(harness.test().codex.as_ref(), |event| match event {
+        EventMsg::TurnComplete(_) => Some(()),
+        _ => None,
+    })
+    .await;
+
+    let captured = requests.requests();
+    assert_eq!(captured.len(), 1);
+    let content_texts = captured[0]["contents"]
+        .as_array()
+        .expect("Gemini synthesis contents")
+        .iter()
+        .flat_map(|content| {
+            content["parts"]
+                .as_array()
+                .expect("Gemini synthesis content parts")
+        })
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        content_texts.contains(&notification),
+        "Gemini synthesis must receive the exact clean notification: {content_texts:?}"
+    );
+    let combined_content = content_texts.join("\n");
+    for transport_key in [
+        r#""author":"#,
+        r#""recipient":"#,
+        r#""other_recipients":"#,
+        r#""trigger_turn":"#,
+    ] {
+        assert!(
+            !combined_content.contains(transport_key),
+            "Gemini synthesis content must not contain transport key {transport_key}: {combined_content}"
+        );
+    }
 
     Ok(())
 }

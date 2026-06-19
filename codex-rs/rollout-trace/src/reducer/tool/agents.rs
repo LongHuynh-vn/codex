@@ -9,6 +9,7 @@ use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::InterAgentCommunication;
 
 use super::super::TraceReducer;
+use crate::model::ConversationChannel;
 use crate::model::ConversationItem;
 use crate::model::ConversationItemKind;
 use crate::model::ConversationPart;
@@ -545,11 +546,17 @@ impl TraceReducer {
 
     fn inter_agent_message_item(&self, item_id: &str) -> Option<(String, String)> {
         let item = self.rollout.conversation_items.get(item_id)?;
-        let (recipient_agent_path, message_content) = inter_agent_message_fields(item)?;
         let thread = self.rollout.threads.get(&item.thread_id)?;
-        if recipient_agent_path != thread.agent_path {
-            return None;
-        }
+        let message_content = if let Some((recipient_agent_path, message_content)) =
+            inter_agent_message_fields(item)
+        {
+            if recipient_agent_path != thread.agent_path {
+                return None;
+            }
+            message_content
+        } else {
+            clean_subagent_notification_content(item)?
+        };
         Some((item.thread_id.clone(), message_content))
     }
 
@@ -614,6 +621,27 @@ fn inter_agent_message_fields(item: &ConversationItem) -> Option<(String, String
     };
     let communication = serde_json::from_str::<InterAgentCommunication>(text).ok()?;
     Some((communication.recipient.to_string(), communication.content))
+}
+
+fn clean_subagent_notification_content(item: &ConversationItem) -> Option<String> {
+    const START_MARKER: &str = "<subagent_notification>";
+    const END_MARKER: &str = "</subagent_notification>";
+
+    if item.role != ConversationRole::Assistant
+        || item.channel != Some(ConversationChannel::Commentary)
+        || item.kind != ConversationItemKind::Message
+    {
+        return None;
+    }
+    let [ConversationPart::Text { text }] = item.body.parts.as_slice() else {
+        return None;
+    };
+    let trimmed = text.trim();
+    if !trimmed.starts_with(START_MARKER) || !trimmed.ends_with(END_MARKER) {
+        return None;
+    }
+
+    Some(text.clone())
 }
 
 #[cfg(test)]

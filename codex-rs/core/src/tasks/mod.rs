@@ -350,7 +350,10 @@ impl Session {
         {
             warn!("failed to apply goal runtime turn-start event: {err}");
         }
-        let pending_items = self.input_queue.get_pending_input(&self.active_turn).await;
+        let pending_items = self
+            .input_queue
+            .get_pending_input(&self.active_turn, turn_context.provider.info().wire_api)
+            .await;
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             let turn = active.get_or_insert_with(ActiveTurn::default);

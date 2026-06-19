@@ -3,6 +3,7 @@
 //! In core, "user turns" are detected by scanning `ResponseItem::Message` items and
 //! interpreting them via `event_mapping::parse_turn_item(...)`.
 
+use crate::context::SubagentNotification;
 use crate::context_manager::is_user_turn_boundary;
 use crate::event_mapping;
 use codex_protocol::items::TurnItem;
@@ -165,8 +166,9 @@ fn is_trigger_turn_boundary(item: &ResponseItem) -> bool {
     };
 
     role == "assistant"
-        && InterAgentCommunication::from_message_content(content)
+        && (InterAgentCommunication::from_message_content(content)
             .is_some_and(|communication| communication.trigger_turn)
+            || SubagentNotification::matches_clean_response_item(item))
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use crate::StateDbHandle;
 use crate::ThreadManager;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+use crate::context::SubagentNotification;
 use crate::function_tool::FunctionCallError;
 use crate::goals::GoalRuntimeEvent;
 use crate::init_state_db;
@@ -45,6 +46,7 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -4672,7 +4674,10 @@ async fn multi_agent_v2_gemini_busy_parent_completion_starts_synthesis_with_repo
     set_turn_config(&mut seed_turn, config);
     use_gemini_provider(&mut seed_turn);
 
-    let manager = thread_manager();
+    let manager = ThreadManager::with_models_provider_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        seed_turn.config.model_provider.clone(),
+    );
     let root = manager
         .start_thread((*seed_turn.config).clone())
         .await
@@ -4754,10 +4759,29 @@ async fn multi_agent_v2_gemini_busy_parent_completion_starts_synthesis_with_repo
 
     if timeout(Duration::from_secs(5), async {
         loop {
-            let communications = session
-                .clone_history()
-                .await
-                .raw_items()
+            let history = session.clone_history().await;
+            let items = history.raw_items();
+            let mut notifications = items
+                .iter()
+                .filter(|item| SubagentNotification::matches_clean_response_item(item))
+                .filter_map(|item| {
+                    let ResponseItem::Message {
+                        role,
+                        content,
+                        phase,
+                        ..
+                    } = item
+                    else {
+                        return None;
+                    };
+                    let [ContentItem::OutputText { text }] = content.as_slice() else {
+                        return None;
+                    };
+                    (role == "assistant" && matches!(phase, Some(MessagePhase::Commentary)))
+                        .then(|| text.clone())
+                })
+                .collect::<Vec<_>>();
+            let serialized_notifications = items
                 .iter()
                 .filter_map(|item| match item {
                     ResponseItem::Message { content, .. } => {
@@ -4765,20 +4789,15 @@ async fn multi_agent_v2_gemini_busy_parent_completion_starts_synthesis_with_repo
                     }
                     _ => None,
                 })
+                .filter(|communication| {
+                    communication.content == expected_a || communication.content == expected_b
+                })
                 .collect::<Vec<_>>();
-            let has_a = communications.iter().any(|communication| {
-                communication.author == path_a
-                    && communication.recipient == AgentPath::root()
-                    && communication.content == expected_a
-                    && communication.trigger_turn
-            });
-            let has_b = communications.iter().any(|communication| {
-                communication.author == path_b
-                    && communication.recipient == AgentPath::root()
-                    && communication.content == expected_b
-                    && communication.trigger_turn
-            });
-            if has_a && has_b {
+            notifications.sort();
+            let mut expected_notifications = vec![expected_a.clone(), expected_b.clone()];
+            expected_notifications.sort();
+            if notifications == expected_notifications {
+                assert_eq!(serialized_notifications, Vec::new());
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

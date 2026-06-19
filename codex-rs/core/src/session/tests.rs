@@ -25,6 +25,7 @@ use codex_config::types::ToolSuggestDisabledTool;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
@@ -8857,7 +8858,9 @@ async fn try_start_turn_if_idle_rejects_active_turn_without_injecting() {
     assert_eq!(vec![item], err);
     assert_eq!(
         Vec::<TurnInput>::new(),
-        sess.input_queue.get_pending_input(&sess.active_turn).await
+        sess.input_queue
+            .get_pending_input(&sess.active_turn, WireApi::Responses)
+            .await
     );
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
@@ -9460,7 +9463,10 @@ async fn budget_limited_accounting_steers_active_turn_without_aborting() -> anyh
     })
     .await?;
 
-    let pending_input = sess.input_queue.get_pending_input(&sess.active_turn).await;
+    let pending_input = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::Responses)
+        .await;
     let [TurnInput::ResponseItem(ResponseItem::Message { role, content, .. })] =
         pending_input.as_slice()
     else {
@@ -9683,7 +9689,10 @@ async fn external_objective_change_steers_active_turn() -> anyhow::Result<()> {
     })
     .await?;
 
-    let pending_input = sess.input_queue.get_pending_input(&sess.active_turn).await;
+    let pending_input = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::Responses)
+        .await;
     assert!(
         pending_input.iter().any(|item| {
             matches!(
@@ -9904,14 +9913,18 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
         "queue-only mailbox mail should stay buffered once the current turn emitted its answer"
     );
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        sess.input_queue
+            .get_pending_input(&sess.active_turn, WireApi::Responses)
+            .await,
         Vec::new()
     );
 
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        sess.input_queue
+            .get_pending_input(&sess.active_turn, WireApi::Responses)
+            .await,
         vec![TurnInput::ResponseItem(ResponseItem::from(
             communication.to_response_input_item()
         ))],
@@ -9994,7 +10007,9 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
     .expect("steered input should be accepted");
 
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        sess.input_queue
+            .get_pending_input(&sess.active_turn, WireApi::Responses)
+            .await,
         vec![
             TurnInput::UserInput {
                 content: vec![UserInput::Text {
@@ -10052,7 +10067,9 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
         .await;
 
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        sess.input_queue
+            .get_pending_input(&sess.active_turn, WireApi::Responses)
+            .await,
         vec![
             TurnInput::UserInput {
                 content: vec![UserInput::Text {
@@ -10116,7 +10133,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
     assert!(output.needs_follow_up);
     assert!(output.tool_future.is_some());
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        sess.input_queue
+            .get_pending_input(&sess.active_turn, WireApi::Responses)
+            .await,
         vec![TurnInput::ResponseItem(ResponseItem::from(
             communication.to_response_input_item()
         ))],
