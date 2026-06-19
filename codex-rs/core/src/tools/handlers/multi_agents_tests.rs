@@ -4761,7 +4761,7 @@ async fn multi_agent_v2_gemini_busy_parent_completion_starts_synthesis_with_repo
         loop {
             let history = session.clone_history().await;
             let items = history.raw_items();
-            let mut notifications = items
+            let notifications = items
                 .iter()
                 .filter(|item| SubagentNotification::matches_clean_response_item(item))
                 .filter_map(|item| {
@@ -4790,14 +4790,15 @@ async fn multi_agent_v2_gemini_busy_parent_completion_starts_synthesis_with_repo
                     _ => None,
                 })
                 .filter(|communication| {
-                    communication.content == expected_a || communication.content == expected_b
+                    <SubagentNotification as crate::context::ContextualUserFragment>::matches_text(
+                        &communication.content,
+                    )
                 })
                 .collect::<Vec<_>>();
-            notifications.sort();
-            let mut expected_notifications = vec![expected_a.clone(), expected_b.clone()];
-            expected_notifications.sort();
-            if notifications == expected_notifications {
-                assert_eq!(serialized_notifications, Vec::new());
+            assert_eq!(serialized_notifications, Vec::new());
+            let has_expected_a = notifications.iter().any(|text| text == &expected_a);
+            let has_expected_b = notifications.iter().any(|text| text == &expected_b);
+            if has_expected_a && has_expected_b {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
