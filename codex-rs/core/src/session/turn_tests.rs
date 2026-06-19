@@ -42,7 +42,8 @@ fn effective_turn_last_agent_message_uses_fallback_for_gemini_spawned_subagent()
             WireApi::GeminiNative,
             /*is_spawned_subagent*/ true,
             /*terminal_last_agent_message*/ None,
-            Some("report".to_string())
+            Some("report".to_string()),
+            /*send_message_to_root_fallback*/ None,
         ),
         Some("report".to_string())
     );
@@ -55,7 +56,8 @@ fn effective_turn_last_agent_message_keeps_gemini_root_terminal_value() {
             WireApi::GeminiNative,
             /*is_spawned_subagent*/ false,
             /*terminal_last_agent_message*/ None,
-            Some("report".to_string())
+            Some("report".to_string()),
+            Some("send message report".to_string()),
         ),
         None
     );
@@ -68,7 +70,8 @@ fn effective_turn_last_agent_message_keeps_non_gemini_terminal_value() {
             WireApi::Responses,
             /*is_spawned_subagent*/ true,
             /*terminal_last_agent_message*/ None,
-            Some("report".to_string())
+            Some("report".to_string()),
+            Some("send message report".to_string()),
         ),
         None
     );
@@ -81,9 +84,38 @@ fn effective_turn_last_agent_message_prefers_terminal_value() {
             WireApi::GeminiNative,
             /*is_spawned_subagent*/ true,
             Some("final".to_string()),
-            Some("report".to_string())
+            Some("report".to_string()),
+            Some("send message report".to_string()),
         ),
         Some("final".to_string())
+    );
+}
+
+#[test]
+fn effective_turn_last_agent_message_uses_send_message_fallback_last() {
+    assert_eq!(
+        effective_turn_last_agent_message(
+            WireApi::GeminiNative,
+            /*is_spawned_subagent*/ true,
+            /*terminal_last_agent_message*/ None,
+            /*fallback_last_agent_message*/ None,
+            Some("send message report".to_string()),
+        ),
+        Some("send message report".to_string())
+    );
+}
+
+#[test]
+fn effective_turn_last_agent_message_prefers_assistant_fallback_over_send_message() {
+    assert_eq!(
+        effective_turn_last_agent_message(
+            WireApi::GeminiNative,
+            /*is_spawned_subagent*/ true,
+            /*terminal_last_agent_message*/ None,
+            Some("assistant report".to_string()),
+            Some("send message report".to_string()),
+        ),
+        Some("assistant report".to_string())
     );
 }
 

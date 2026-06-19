@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use anyhow::Result;
 use codex_gemini_adapter::GEMINI_3_5_FLASH_MODEL;
@@ -24,6 +25,7 @@ use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
 use serial_test::serial;
+use wiremock::Match;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::Respond;
@@ -47,6 +49,18 @@ struct GeminiSseResponder {
     num_calls: AtomicUsize,
     responses: Vec<String>,
     requests: Arc<Mutex<Vec<Value>>>,
+    response_delay: Option<Duration>,
+}
+
+struct GeminiRequestMatcher<F>(F);
+
+impl<F> Match for GeminiRequestMatcher<F>
+where
+    F: Fn(&wiremock::Request) -> bool + Send + Sync,
+{
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        (self.0)(request)
+    }
 }
 
 impl Respond for GeminiSseResponder {
@@ -59,9 +73,13 @@ impl Respond for GeminiSseResponder {
             .responses
             .get(call_num)
             .unwrap_or_else(|| panic!("no Gemini response for call {call_num}"));
-        ResponseTemplate::new(200)
+        let response = ResponseTemplate::new(200)
             .insert_header("content-type", "text/event-stream")
-            .set_body_string(body.clone())
+            .set_body_string(body.clone());
+        match self.response_delay {
+            Some(delay) => response.set_delay(delay),
+            None => response,
+        }
     }
 }
 
@@ -74,6 +92,7 @@ pub(super) async fn mount_gemini_sse_sequence(
         num_calls: AtomicUsize::new(0),
         responses,
         requests: Arc::clone(&requests),
+        response_delay: None,
     };
     let num_calls = responder.responses.len();
     Mock::given(method("POST"))
@@ -83,6 +102,36 @@ pub(super) async fn mount_gemini_sse_sequence(
         .respond_with(responder)
         .up_to_n_times(num_calls as u64)
         .expect(num_calls as u64)
+        .mount(server)
+        .await;
+
+    GeminiRequestLog { requests }
+}
+
+pub(super) async fn mount_gemini_sse_once_match<F>(
+    server: &MockServer,
+    matcher: F,
+    response: String,
+    response_delay: Option<Duration>,
+) -> GeminiRequestLog
+where
+    F: Fn(&wiremock::Request) -> bool + Send + Sync + 'static,
+{
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let responder = GeminiSseResponder {
+        num_calls: AtomicUsize::new(0),
+        responses: vec![response],
+        requests: Arc::clone(&requests),
+        response_delay,
+    };
+    Mock::given(method("POST"))
+        .and(path_regex(
+            ".*/models/gemini-3\\.5-flash:streamGenerateContent$",
+        ))
+        .and(GeminiRequestMatcher(matcher))
+        .respond_with(responder)
+        .up_to_n_times(1)
+        .expect(1)
         .mount(server)
         .await;
 
@@ -168,6 +217,24 @@ pub(super) fn gemini_text_sse(text: &str) -> String {
             "candidatesTokenCount": 1,
             "thoughtsTokenCount": 1,
             "totalTokenCount": 12,
+        },
+    })])
+}
+
+pub(super) fn gemini_empty_sse() -> String {
+    gemini_sse(vec![json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [],
+            },
+            "finishReason": "STOP",
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 10,
+            "candidatesTokenCount": 0,
+            "thoughtsTokenCount": 0,
+            "totalTokenCount": 10,
         },
     })])
 }

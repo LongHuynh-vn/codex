@@ -95,6 +95,7 @@ pub(crate) struct TurnState {
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
+    pub(crate) gemini_spawned_subagent_last_send_message_to_root: Option<String>,
 }
 
 pub(crate) struct PendingRequestPermissions {

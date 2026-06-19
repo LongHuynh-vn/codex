@@ -196,6 +196,7 @@ pub(crate) async fn run_turn(
 
     let mut last_agent_message: Option<String> = None;
     let mut last_non_empty_sampling_request_last_agent_message: Option<String> = None;
+    let wire_api = turn_context.provider.info().wire_api;
     let is_spawned_subagent = matches!(
         &turn_context.session_source,
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
@@ -335,11 +336,29 @@ pub(crate) async fn run_turn(
                 }
 
                 if !needs_follow_up {
+                    let send_message_to_root_fallback =
+                        if wire_api == WireApi::GeminiNative && is_spawned_subagent {
+                            match sess
+                                .input_queue
+                                .turn_state_for_sub_id(&sess.active_turn, &turn_context.sub_id)
+                                .await
+                            {
+                                Some(turn_state) => turn_state
+                                    .lock()
+                                    .await
+                                    .gemini_spawned_subagent_last_send_message_to_root
+                                    .clone(),
+                                None => None,
+                            }
+                        } else {
+                            None
+                        };
                     last_agent_message = effective_turn_last_agent_message(
-                        turn_context.provider.info().wire_api,
+                        wire_api,
                         is_spawned_subagent,
                         sampling_request_last_agent_message,
                         last_non_empty_sampling_request_last_agent_message.clone(),
+                        send_message_to_root_fallback,
                     );
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
@@ -1217,12 +1236,12 @@ fn effective_turn_last_agent_message(
     is_spawned_subagent: bool,
     terminal_last_agent_message: Option<String>,
     fallback_last_agent_message: Option<String>,
+    send_message_to_root_fallback: Option<String>,
 ) -> Option<String> {
-    if wire_api == WireApi::GeminiNative
-        && is_spawned_subagent
-        && terminal_last_agent_message.is_none()
-    {
-        fallback_last_agent_message
+    if wire_api == WireApi::GeminiNative && is_spawned_subagent {
+        terminal_last_agent_message
+            .or(fallback_last_agent_message)
+            .or(send_message_to_root_fallback)
     } else {
         terminal_last_agent_message
     }

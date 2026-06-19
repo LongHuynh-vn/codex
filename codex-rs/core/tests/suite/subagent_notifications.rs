@@ -1,5 +1,8 @@
 use super::gemini_native_phase2::gemini_builder as mock_gemini_builder;
+use super::gemini_native_phase2::gemini_empty_sse;
+use super::gemini_native_phase2::gemini_function_call_sse;
 use super::gemini_native_phase2::gemini_text_sse;
+use super::gemini_native_phase2::mount_gemini_sse_once_match;
 use super::gemini_native_phase2::mount_gemini_sse_sequence;
 use anyhow::Result;
 use codex_core::StartThreadOptions;
@@ -10,6 +13,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
@@ -63,6 +67,11 @@ const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 const SUBAGENT_START_CONTEXT: &str = "subagent start context reaches child";
 const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
+const GEMINI_SEND_MESSAGE_ONLY_PARENT_PROMPT: &str =
+    "spawn a child that reports only through send_message";
+const GEMINI_SEND_MESSAGE_ONLY_CHILD_PROMPT: &str =
+    "send your complete report to /root with send_message and emit no final text";
+const GEMINI_SEND_MESSAGE_ONLY_REPORT: &str = "send-message-only child report";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     let is_zstd = req
@@ -874,6 +883,149 @@ async fn gemini_trigger_turn_subagent_notification_uses_clean_content() -> Resul
             "Gemini synthesis content must not contain transport key {transport_key}: {combined_content}"
         );
     }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_spawned_child_send_message_only_report_becomes_completion_body() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    }))
+    .await?;
+    let server = harness.server();
+    let _parent_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_SEND_MESSAGE_ONLY_PARENT_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "spawn_agent",
+            json!({
+                "message": GEMINI_SEND_MESSAGE_ONLY_CHILD_PROMPT,
+                "task_name": "send_message_only_worker",
+            }),
+            Some("sig-spawn-send-message-only"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _parent_after_spawn = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_SEND_MESSAGE_ONLY_PARENT_PROMPT)
+                && body_contains(req, r#""functionResponse""#)
+                && body_contains(req, r#""name":"spawn_agent""#)
+                && !body_contains(req, "<subagent_notification>")
+        },
+        gemini_text_sse("parent waiting for child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _child_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_SEND_MESSAGE_ONLY_CHILD_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "send_message",
+            json!({
+                "target": "/root",
+                "message": GEMINI_SEND_MESSAGE_ONLY_REPORT,
+            }),
+            Some("sig-child-send-message-only"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _child_after_send = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_SEND_MESSAGE_ONLY_CHILD_PROMPT)
+                && body_contains(req, r#""functionResponse""#)
+                && body_contains(req, r#""name":"send_message""#)
+        },
+        gemini_empty_sse(),
+        Some(Duration::from_secs(1)),
+    )
+    .await;
+    let synthesis = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, "<subagent_notification>"),
+        gemini_text_sse("synthesized send-message-only child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn(GEMINI_SEND_MESSAGE_ONLY_PARENT_PROMPT)
+        .await?;
+    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
+    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
+    let child_thread = harness
+        .test()
+        .thread_manager
+        .get_thread(spawned_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("spawned child thread should exist"))?;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = child_thread.agent_status().await;
+        if matches!(status, AgentStatus::Completed(_)) {
+            assert_eq!(
+                status,
+                AgentStatus::Completed(Some(GEMINI_SEND_MESSAGE_ONLY_REPORT.to_string()))
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let captured = loop {
+        let captured = synthesis.requests();
+        if !captured.is_empty() {
+            break captured;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent synthesis request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(captured.len(), 1);
+    let content_texts = captured[0]["contents"]
+        .as_array()
+        .expect("Gemini synthesis contents")
+        .iter()
+        .flat_map(|content| {
+            content["parts"]
+                .as_array()
+                .expect("Gemini synthesis content parts")
+        })
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let expected_notification = concat!(
+        "<subagent_notification>\n",
+        r#"{"agent_path":"/root/send_message_only_worker","status":{"completed":"send-message-only child report"}}"#,
+        "\n</subagent_notification>"
+    );
+    assert!(content_texts.contains(&expected_notification));
+    assert!(
+        !content_texts
+            .iter()
+            .any(|text| text.contains(r#""completed":null"#))
+    );
 
     Ok(())
 }

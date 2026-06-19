@@ -1886,7 +1886,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         agent_role: None,
     });
 
-    SendMessageHandlerV2
+    let output = SendMessageHandlerV2
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1898,6 +1898,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         ))
         .await
         .expect("send_message should accept the root agent path");
+    assert_eq!(expect_text_output(output), (String::new(), Some(true)));
 
     assert!(manager.captured_ops().iter().any(|(id, op)| {
         *id == root.thread_id
@@ -4635,6 +4636,115 @@ impl SessionTask for ReleaseGatedParentTask {
             _ = cancellation_token.cancelled() => None,
         }
     }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_gemini_spawned_child_captures_only_root_send_message_for_completion() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+    let (worker_id, _worker_nickname, _worker_role, worker_path) =
+        spawn_worker(&session, &turn, "worker").await;
+    let (sibling_id, _sibling_nickname, _sibling_role, sibling_path) =
+        spawn_worker(&session, &turn, "sibling").await;
+    let worker_thread = manager
+        .get_thread(worker_id)
+        .await
+        .expect("worker thread should exist");
+    let worker_session = worker_thread.codex.session.clone();
+    let worker_turn = worker_session.new_default_turn().await;
+    assert_eq!(worker_turn.provider.info().wire_api, WireApi::GeminiNative);
+    assert!(matches!(
+        &worker_turn.session_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+    ));
+
+    let release = Arc::new(Notify::new());
+    worker_session
+        .spawn_task(
+            worker_turn.clone(),
+            Vec::new(),
+            ReleaseGatedParentTask {
+                release: Arc::clone(&release),
+            },
+        )
+        .await;
+
+    let sibling_output = SendMessageHandlerV2
+        .handle(invocation(
+            worker_session.clone(),
+            worker_turn.clone(),
+            "send_message",
+            function_payload(json!({
+                "target": sibling_path.as_str(),
+                "message": "sibling report",
+            })),
+        ))
+        .await
+        .expect("send_message should accept sibling path");
+    assert_eq!(
+        expect_text_output(sibling_output),
+        (String::new(), Some(true))
+    );
+    let turn_state = worker_session
+        .input_queue
+        .turn_state_for_sub_id(&worker_session.active_turn, &worker_turn.sub_id)
+        .await
+        .expect("worker turn state should exist");
+    assert_eq!(
+        turn_state
+            .lock()
+            .await
+            .gemini_spawned_subagent_last_send_message_to_root
+            .clone(),
+        None
+    );
+
+    let root_output = SendMessageHandlerV2
+        .handle(invocation(
+            worker_session.clone(),
+            worker_turn.clone(),
+            "send_message",
+            function_payload(json!({
+                "target": "/root",
+                "message": "root report",
+            })),
+        ))
+        .await
+        .expect("send_message should accept root path");
+    assert_eq!(expect_text_output(root_output), (String::new(), Some(true)));
+    assert_eq!(
+        turn_state
+            .lock()
+            .await
+            .gemini_spawned_subagent_last_send_message_to_root
+            .clone(),
+        Some("root report".to_string())
+    );
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == sibling_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == worker_path
+                        && communication.recipient == sibling_path
+                        && communication.content == "sibling report"
+                        && !communication.trigger_turn
+            )
+    }));
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == session.thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == worker_path
+                        && communication.recipient == AgentPath::root()
+                        && communication.content == "root report"
+                        && !communication.trigger_turn
+            )
+    }));
+
+    worker_session
+        .abort_all_tasks(TurnAbortReason::Interrupted)
+        .await;
 }
 
 async fn complete_worker_turn_and_notify_parent(

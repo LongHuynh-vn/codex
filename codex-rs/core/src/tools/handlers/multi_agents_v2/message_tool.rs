@@ -6,7 +6,10 @@
 use super::*;
 use crate::tools::context::FunctionToolOutput;
 use crate::turn_timing::now_unix_timestamp_ms;
+use codex_model_provider_info::WireApi;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MessageDeliveryMode {
@@ -101,6 +104,14 @@ pub(crate) async fn handle_message_string_tool(
     let receiver_agent_path = receiver_agent.agent_path.clone().ok_or_else(|| {
         FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
     })?;
+    let completion_report = (mode == MessageDeliveryMode::QueueOnly
+        && turn.provider.info().wire_api == WireApi::GeminiNative
+        && matches!(
+            &turn.session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        )
+        && receiver_agent_path.is_root())
+    .then(|| prompt.clone());
     let communication = InterAgentCommunication::new(
         turn.session_source
             .get_agent_path()
@@ -138,6 +149,18 @@ pub(crate) async fn handle_message_string_tool(
         )
         .await;
     result?;
+
+    if let Some(completion_report) = completion_report
+        && let Some(turn_state) = session
+            .input_queue
+            .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
+            .await
+    {
+        turn_state
+            .lock()
+            .await
+            .gemini_spawned_subagent_last_send_message_to_root = Some(completion_report);
+    }
 
     Ok(FunctionToolOutput::from_text(String::new(), Some(true)))
 }
