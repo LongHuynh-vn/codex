@@ -1841,6 +1841,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
 async fn assert_v2_child_completion_trigger_turn(
     provider: ModelProviderInfo,
     provider_id: &str,
+    last_agent_message: Option<String>,
     expected_trigger_turn: bool,
 ) {
     let expected_wire_api = provider.wire_api;
@@ -1906,7 +1907,7 @@ async fn assert_v2_child_completion_trigger_turn(
             tester_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
-                last_agent_message: Some("done".to_string()),
+                last_agent_message: last_agent_message.clone(),
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -1916,7 +1917,7 @@ async fn assert_v2_child_completion_trigger_turn(
 
     let expected_message = crate::session_prefix::format_subagent_notification_message(
         tester_path.as_str(),
-        &AgentStatus::Completed(Some("done".to_string())),
+        &AgentStatus::Completed(last_agent_message),
     );
     let expected = (
         worker_thread_id,
@@ -1957,7 +1958,22 @@ async fn multi_agent_v2_gemini_child_completion_wakes_idle_parent() {
     assert_v2_child_completion_trigger_turn(
         ModelProviderInfo::create_gemini_provider(),
         GEMINI_PROVIDER_ID,
+        /*last_agent_message*/ Some("done".to_string()),
         /*expected_trigger_turn*/ true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn multi_agent_v2_gemini_empty_child_completion_does_not_wake_idle_parent() {
+    // An empty completion (`Completed(None)`) carries no report body; on Gemini
+    // it must NOT wake the idle parent, even though the notification is still
+    // queued for the parent's next turn.
+    assert_v2_child_completion_trigger_turn(
+        ModelProviderInfo::create_gemini_provider(),
+        GEMINI_PROVIDER_ID,
+        /*last_agent_message*/ None,
+        /*expected_trigger_turn*/ false,
     )
     .await;
 }
@@ -1968,6 +1984,20 @@ async fn multi_agent_v2_non_gemini_child_completion_does_not_wake_idle_parent() 
     assert_v2_child_completion_trigger_turn(
         provider,
         OPENAI_PROVIDER_ID,
+        /*last_agent_message*/ Some("done".to_string()),
+        /*expected_trigger_turn*/ false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn multi_agent_v2_non_gemini_empty_child_completion_does_not_wake_idle_parent() {
+    // Non-Gemini providers stay queue-only for empty completions as well.
+    let provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+    assert_v2_child_completion_trigger_turn(
+        provider,
+        OPENAI_PROVIDER_ID,
+        /*last_agent_message*/ None,
         /*expected_trigger_turn*/ false,
     )
     .await;

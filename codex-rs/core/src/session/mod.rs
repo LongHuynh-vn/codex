@@ -1792,9 +1792,12 @@ impl Session {
             .is_enabled()
             .then(|| message.clone());
         // On Gemini, wake an idle parent so it collects and synthesizes child
-        // completions without a user follow-up. Other wire APIs keep the prior
-        // queue-only behavior (the parent stays idle until its next turn).
-        let trigger_turn = turn_context.provider.info().wire_api == WireApi::GeminiNative;
+        // completions without a user follow-up — but NOT for an empty completion
+        // (`Completed(None)`), whose null body is pure noise and only causes the
+        // parent to spin and overshoot its goal budget. Other wire APIs keep the
+        // prior queue-only behavior (the parent stays idle until its next turn).
+        let trigger_turn = turn_context.provider.info().wire_api == WireApi::GeminiNative
+            && !matches!(status, AgentStatus::Completed(None));
         let communication = InterAgentCommunication::new(
             child_agent_path.clone(),
             parent_agent_path,
