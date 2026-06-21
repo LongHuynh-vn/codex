@@ -142,6 +142,12 @@ pub(super) fn gemini_builder() -> TestCodexBuilder {
     test_codex().with_config(|config| {
         let mut provider = ModelProviderInfo::create_gemini_provider();
         provider.base_url = config.model_provider.base_url.clone();
+        // Authenticate via the mock bearer token rather than the GEMINI_API_KEY env var, so the
+        // suite runs without that variable set (the integration gate unsets it). `api_key()` hard
+        // errors when `env_key` is configured but the env var is missing, which short-circuits the
+        // `experimental_bearer_token` fallback in `resolve_auth`; null it like the adapter's own
+        // bearer-token unit test does.
+        provider.env_key = None;
         provider.experimental_bearer_token = Some("mock-gemini-key".to_string());
         config.model = Some(GEMINI_3_5_FLASH_MODEL.to_string());
         config.model_catalog = Some(gemini_model_catalog());
