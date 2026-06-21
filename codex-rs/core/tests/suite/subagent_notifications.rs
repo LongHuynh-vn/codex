@@ -970,12 +970,7 @@ async fn gemini_spawned_child_send_message_only_report_becomes_completion_body()
         .await?;
     let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
     let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
-    let child_thread = harness
-        .test()
-        .thread_manager
-        .get_thread(spawned_id)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("spawned child thread should exist"))?;
+    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
     let deadline = Instant::now() + Duration::from_secs(6);
     loop {
         let status = child_thread.agent_status().await;
