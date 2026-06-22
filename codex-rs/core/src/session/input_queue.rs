@@ -18,10 +18,12 @@ fn mailbox_communication_to_response_item(
     mail: InterAgentCommunication,
     wire_api: WireApi,
 ) -> ResponseItem {
-    if wire_api == WireApi::GeminiNative
-        && mail.trigger_turn
-        && SubagentNotification::matches_text(&mail.content)
-    {
+    // `trigger_turn` governs WAKING (set in forward_child_completion_to_parent),
+    // not drain-time formatting. A subagent-notification-shaped Gemini mail must
+    // ALWAYS inject as the clean <subagent_notification> Commentary item when
+    // drained, even when it did not wake the parent (e.g. an empty
+    // `Completed(None)` completion, which queues with trigger_turn:false).
+    if wire_api == WireApi::GeminiNative && SubagentNotification::matches_text(&mail.content) {
         ResponseItem::Message {
             id: None,
             role: "assistant".to_string(),
@@ -370,17 +372,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_queue_preserves_other_gemini_envelopes() {
+    async fn input_queue_drains_gemini_queue_only_notification_as_clean_commentary() {
+        // Regression: an empty child completion (`Completed(None)`) queues with
+        // trigger_turn:false so it does not wake an idle parent (see
+        // forward_child_completion_to_parent). It must STILL drain as the clean
+        // <subagent_notification> Commentary item, not the raw transport envelope
+        // that previously leaked into the parent's context and confused the model.
         let input_queue = InputQueue::new();
-        let queue_only_notification = make_mail(
+        let notification = crate::session_prefix::format_subagent_notification_message(
+            "/root/worker",
+            &codex_protocol::protocol::AgentStatus::Completed(None),
+        );
+        let mail = make_mail(
             AgentPath::try_from("/root/worker").expect("agent path"),
             AgentPath::root(),
-            &crate::session_prefix::format_subagent_notification_message(
-                "/root/worker",
-                &codex_protocol::protocol::AgentStatus::Completed(Some("report".to_string())),
-            ),
+            &notification,
             /*trigger_turn*/ false,
         );
+
+        input_queue
+            .enqueue_mailbox_communication(mail.clone())
+            .await;
+
+        assert_eq!(
+            input_queue
+                .drain_mailbox_input_items(WireApi::GeminiNative)
+                .await,
+            vec![ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text: notification }],
+                phase: Some(MessagePhase::Commentary),
+            }]
+        );
+        assert!(!input_queue.has_pending_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn input_queue_preserves_ordinary_gemini_envelope() {
+        // A non-notification mail (matches_text == false) drains RAW even when it
+        // carries trigger_turn:true — clean injection is gated on the mail's shape,
+        // not on whether it woke the parent.
+        let input_queue = InputQueue::new();
         let ordinary_mail = make_mail(
             AgentPath::try_from("/root/worker").expect("agent path"),
             AgentPath::root(),
@@ -389,9 +422,6 @@ mod tests {
         );
 
         input_queue
-            .enqueue_mailbox_communication(queue_only_notification.clone())
-            .await;
-        input_queue
             .enqueue_mailbox_communication(ordinary_mail.clone())
             .await;
 
@@ -399,10 +429,7 @@ mod tests {
             input_queue
                 .drain_mailbox_input_items(WireApi::GeminiNative)
                 .await,
-            vec![
-                ResponseItem::from(queue_only_notification.to_response_input_item()),
-                ResponseItem::from(ordinary_mail.to_response_input_item()),
-            ]
+            vec![ResponseItem::from(ordinary_mail.to_response_input_item())]
         );
     }
 
