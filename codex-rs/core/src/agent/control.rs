@@ -38,6 +38,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 use tokio::sync::watch;
 use tracing::warn;
@@ -164,6 +165,13 @@ pub(crate) struct AgentControl {
     /// `ThreadManagerState -> CodexThread -> Session -> SessionServices -> ThreadManagerState`.
     manager: Weak<ThreadManagerState>,
     state: Arc<AgentRegistry>,
+    /// Per-parent snapshot of the child statuses a `wait_agent` call last delivered to that
+    /// parent, keyed by the waiting parent's `ThreadId`. Shared across the whole spawn tree
+    /// (every `AgentControl` clone holds the same `Arc`). Used only on the Gemini status path
+    /// to detect a redundant repeat wait — a parent re-calling `wait_agent` while every child's
+    /// terminal status is unchanged since the previous wait — so the repeat result can omit the
+    /// already-delivered report bodies instead of re-injecting them.
+    wait_delivery_snapshots: Arc<Mutex<HashMap<ThreadId, HashMap<ThreadId, AgentStatus>>>>,
 }
 
 impl AgentControl {
@@ -877,6 +885,27 @@ impl AgentControl {
         if current_parent_thread_id.is_none() {
             self.state.register_root_thread(current_thread_id);
         }
+    }
+
+    /// Record the child statuses a `wait_agent` call is delivering to `parent`, replacing the
+    /// previously stored snapshot for that parent, and report whether `current` is identical to
+    /// what was last delivered (i.e. nothing changed since the previous wait for this parent).
+    ///
+    /// Used by the Gemini status path to compact redundant repeat waits. The lock is held only
+    /// for this synchronous compare-and-swap (never across an `.await`), so it cannot stall the
+    /// runtime or deadlock the waiting parent.
+    pub(crate) fn record_wait_delivery_unchanged(
+        &self,
+        parent: ThreadId,
+        current: &HashMap<ThreadId, AgentStatus>,
+    ) -> bool {
+        let mut guard = self
+            .wait_delivery_snapshots
+            .lock()
+            .expect("wait_delivery_snapshots mutex poisoned");
+        let unchanged = guard.get(&parent).is_some_and(|prev| prev == current);
+        guard.insert(parent, current.clone());
+        unchanged
     }
 
     pub(crate) fn get_agent_metadata(&self, agent_id: ThreadId) -> Option<AgentMetadata> {

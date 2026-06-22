@@ -3446,6 +3446,8 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
             timed_out: false,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -3513,6 +3515,8 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() 
             timed_out: true,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -3571,6 +3575,8 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
             timed_out: true,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -3613,6 +3619,8 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
             timed_out: true,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -3680,6 +3688,8 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() 
             timed_out: true,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -3941,6 +3951,8 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
             timed_out: false,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -4015,6 +4027,12 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
     .expect("already queued mail should complete wait_agent immediately")
     .expect("wait_agent should succeed");
     let (content, success) = expect_text_output(output);
+    // Non-Gemini path stays byte-identical: the Change 1 structured fields are skipped entirely
+    // (this complements the timed-out raw-JSON assertion in the non-Gemini ignores-completed test).
+    assert_eq!(
+        content,
+        r#"{"message":"Wait completed.","timed_out":false}"#
+    );
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
@@ -4024,6 +4042,8 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
             timed_out: false,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -4117,6 +4137,8 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
             timed_out: false,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert_eq!(success, None);
@@ -4207,6 +4229,8 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
             timed_out: false,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     assert!(!content.contains("sensitive child output"));
@@ -4214,71 +4238,11 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_wait_agent_gemini_reports_completed_child_status_without_mailbox() {
-    let (mut session, mut turn, rx) = make_session_and_context_with_rx().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    {
-        let session = Arc::get_mut(&mut session).expect("session should be uniquely owned");
-        session.services.agent_control = manager.agent_control();
-        session.thread_id = root.thread_id;
-    }
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    {
-        let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
-        set_turn_config(turn, config);
-        use_gemini_provider(turn);
-    }
-
-    SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "boot worker",
-                "task_name": "worker"
-            })),
-        ))
-        .await
-        .expect("spawn worker");
-    let agent_id = session
-        .services
-        .agent_control
-        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
-        .await
-        .expect("worker should resolve");
-    let agent_metadata = session
-        .services
-        .agent_control
-        .get_agent_metadata(agent_id)
-        .expect("worker metadata");
-    let child_thread = manager
-        .get_thread(agent_id)
-        .await
-        .expect("worker thread should exist");
-    let child_turn = child_thread.codex.session.new_default_turn().await;
-    child_thread
-        .codex
-        .session
-        .send_event_raw(Event {
-            id: child_turn.sub_id.clone(),
-            msg: EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: child_turn.sub_id.clone(),
-                last_agent_message: Some("child result".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        })
-        .await;
+async fn multi_agent_v2_wait_agent_gemini_keeps_plain_message_for_bodied_completion() {
+    let (session, turn, rx, manager) = gemini_wait_setup().await;
+    let (agent_id, agent_nickname, agent_role, _path) =
+        spawn_worker(&session, &turn, "worker").await;
+    complete_worker_turn(&manager, agent_id, "child result").await;
 
     let output = timeout(
         Duration::from_millis(500),
@@ -4303,8 +4267,8 @@ async fn multi_agent_v2_wait_agent_gemini_reports_completed_child_status_without
     let expected_statuses = HashMap::from([(agent_id, completed.clone())]);
     let expected_agent_statuses = vec![CollabAgentStatusEntry {
         thread_id: agent_id,
-        agent_nickname: agent_metadata.agent_nickname,
-        agent_role: agent_metadata.agent_role,
+        agent_nickname,
+        agent_role,
         status: completed,
     }];
     assert_eq!(
@@ -4314,6 +4278,8 @@ async fn multi_agent_v2_wait_agent_gemini_reports_completed_child_status_without
             timed_out: false,
             statuses: Some(expected_statuses.clone()),
             agent_statuses: Some(expected_agent_statuses.clone()),
+            empty_completions: vec![],
+            wait_again_allowed: Some(true),
         }
     );
     let end_event = last_waiting_end_event(&rx).await;
@@ -4332,6 +4298,333 @@ async fn multi_agent_v2_wait_agent_gemini_reports_completed_child_status_without
         )
     );
     assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_directs_parent_after_empty_completion() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+    let (agent_id, agent_nickname, agent_role, _path) =
+        spawn_worker(&session, &turn, "worker").await;
+    complete_worker_turn_without_report(&manager, agent_id).await;
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("empty completion should unblock wait_agent")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    let display_label = agent_nickname
+        .clone()
+        .unwrap_or_else(|| agent_id.to_string());
+    assert!(result.message.starts_with("Wait completed."));
+    assert!(result.message.contains(&format!(
+        "1 of 1 agents are terminal with no report: {display_label}."
+    )));
+    assert!(result.message.contains(
+        "They are not running — calling wait_agent again returns immediately and cannot produce a report for them. To get a report, send the agent a single concrete follow-up first, then wait again; otherwise proceed with the results you already have. Do not re-spawn these agents."
+    ));
+    let message = result.message.clone();
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message,
+            timed_out: false,
+            statuses: Some(HashMap::from([(agent_id, AgentStatus::Completed(None))])),
+            agent_statuses: Some(vec![CollabAgentStatusEntry {
+                thread_id: agent_id,
+                agent_nickname,
+                agent_role,
+                status: AgentStatus::Completed(None),
+            }]),
+            empty_completions: vec![display_label],
+            wait_again_allowed: Some(false),
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_names_only_empty_completion_in_mixed_result() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+    let (bodied_id, bodied_nickname, bodied_role, _bodied_path) =
+        spawn_worker(&session, &turn, "bodied_worker").await;
+    let (empty_id, empty_nickname, empty_role, _empty_path) =
+        spawn_worker(&session, &turn, "empty_worker").await;
+    complete_worker_turn(&manager, bodied_id, "bodied result").await;
+    complete_worker_turn_without_report(&manager, empty_id).await;
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("mixed completions should unblock wait_agent")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let mut result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    let empty_label = empty_nickname
+        .clone()
+        .unwrap_or_else(|| empty_id.to_string());
+    let expected_message = format!(
+        "Wait completed. 1 of 2 agents are terminal with no report: {empty_label}. They are not running — calling wait_agent again returns immediately and cannot produce a report for them. To get a report, send the agent a single concrete follow-up first, then wait again; otherwise proceed with the results you already have. Do not re-spawn these agents."
+    );
+    let expected_statuses = HashMap::from([
+        (
+            bodied_id,
+            AgentStatus::Completed(Some("bodied result".to_string())),
+        ),
+        (empty_id, AgentStatus::Completed(None)),
+    ]);
+    let mut agent_statuses = result
+        .agent_statuses
+        .take()
+        .expect("agent statuses should be present");
+    agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    let mut expected_agent_statuses = vec![
+        CollabAgentStatusEntry {
+            thread_id: bodied_id,
+            agent_nickname: bodied_nickname,
+            agent_role: bodied_role,
+            status: AgentStatus::Completed(Some("bodied result".to_string())),
+        },
+        CollabAgentStatusEntry {
+            thread_id: empty_id,
+            agent_nickname: empty_nickname,
+            agent_role: empty_role,
+            status: AgentStatus::Completed(None),
+        },
+    ];
+    expected_agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    result.agent_statuses = Some(agent_statuses);
+    assert_eq!(
+        result,
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: expected_message,
+            timed_out: false,
+            statuses: Some(expected_statuses),
+            agent_statuses: Some(expected_agent_statuses),
+            empty_completions: vec![empty_label],
+            wait_again_allowed: Some(false),
+        }
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_empty_completion_sets_structured_signal() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+    let (agent_id, agent_nickname, agent_role, _path) =
+        spawn_worker(&session, &turn, "worker").await;
+    complete_worker_turn_without_report(&manager, agent_id).await;
+    let display_label = agent_nickname
+        .clone()
+        .unwrap_or_else(|| agent_id.to_string());
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("empty completion should unblock wait_agent")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+
+    // Machine-readable "do not re-wait" signal: the empty-completion agent is named and
+    // wait_again_allowed is false (re-waiting would return immediately with no new report).
+    assert_eq!(result.empty_completions, vec![display_label]);
+    assert_eq!(result.wait_again_allowed, Some(false));
+    // The statuses / agent_statuses payloads are unchanged — Change 1 only adds sibling fields.
+    assert_eq!(
+        result.statuses,
+        Some(HashMap::from([(agent_id, AgentStatus::Completed(None))]))
+    );
+    assert_eq!(
+        result.agent_statuses,
+        Some(vec![CollabAgentStatusEntry {
+            thread_id: agent_id,
+            agent_nickname,
+            agent_role,
+            status: AgentStatus::Completed(None),
+        }])
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_redundant_repeat_returns_compact() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+    let (bodied_id, _bodied_nickname, _bodied_role, _bodied_path) =
+        spawn_worker(&session, &turn, "bodied_worker").await;
+    let (empty_id, empty_nickname, _empty_role, _empty_path) =
+        spawn_worker(&session, &turn, "empty_worker").await;
+    complete_worker_turn(&manager, bodied_id, "BODIED_REPORT_BODY_MARKER").await;
+    complete_worker_turn_without_report(&manager, empty_id).await;
+    let empty_label = empty_nickname.unwrap_or_else(|| empty_id.to_string());
+
+    // First wait: full delivery — carries the bodied report in full.
+    let first = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("first wait should return")
+    .expect("wait_agent should succeed");
+    let (first_content, _) = expect_text_output(first);
+    assert!(
+        first_content.contains("BODIED_REPORT_BODY_MARKER"),
+        "first wait must deliver the bodied report in full: {first_content}"
+    );
+    let first_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&first_content).expect("wait_agent result should be json");
+    assert!(first_result.statuses.is_some());
+    assert_eq!(first_result.empty_completions, vec![empty_label.clone()]);
+    assert_eq!(first_result.wait_again_allowed, Some(false));
+
+    // Second wait over the same unchanged terminal set: compact — the already-delivered report
+    // body is NOT re-injected, but the directive and structured fields ARE present.
+    let second = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("second wait should return")
+    .expect("wait_agent should succeed");
+    let (second_content, second_success) = expect_text_output(second);
+    assert!(
+        !second_content.contains("BODIED_REPORT_BODY_MARKER"),
+        "redundant repeat must not re-inject the already-delivered report body: {second_content}"
+    );
+    let second_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&second_content).expect("wait_agent result should be json");
+    assert!(second_result.message.starts_with("Wait completed."));
+    assert!(second_result.message.contains("terminal with no report"));
+    assert_eq!(second_result.statuses, None);
+    assert_eq!(second_result.agent_statuses, None);
+    assert_eq!(second_result.empty_completions, vec![empty_label]);
+    assert_eq!(second_result.wait_again_allowed, Some(false));
+    assert_eq!(second_success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_followup_reenables_full_delivery() {
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+    let (agent_id, agent_nickname, _agent_role, _path) =
+        spawn_worker(&session, &turn, "worker").await;
+    complete_worker_turn_without_report(&manager, agent_id).await;
+    let display_label = agent_nickname.unwrap_or_else(|| agent_id.to_string());
+
+    // First wait: empty completion → directive, wait_again_allowed false.
+    let first = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("first wait should return")
+    .expect("wait_agent should succeed");
+    let (first_content, _) = expect_text_output(first);
+    let first_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&first_content).expect("wait_agent result should be json");
+    assert_eq!(first_result.empty_completions, vec![display_label]);
+    assert_eq!(first_result.wait_again_allowed, Some(false));
+
+    // A follow-up produces a report: the child leaves Completed(None) for Completed(Some(..)).
+    complete_worker_turn(&manager, agent_id, "report after followup").await;
+
+    // Next wait: the status changed, so this is a full delivery that carries the report once and
+    // flips wait_again_allowed back to true with no outstanding empty completions.
+    let second = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("second wait should return")
+    .expect("wait_agent should succeed");
+    let (second_content, _) = expect_text_output(second);
+    assert!(
+        second_content.contains("report after followup"),
+        "post-follow-up wait must deliver the new report in full: {second_content}"
+    );
+    let second_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&second_content).expect("wait_agent result should be json");
+    assert_eq!(
+        second_result.statuses,
+        Some(HashMap::from([(
+            agent_id,
+            AgentStatus::Completed(Some("report after followup".to_string()))
+        )]))
+    );
+    assert_eq!(second_result.empty_completions, Vec::<String>::new());
+    assert_eq!(second_result.wait_again_allowed, Some(true));
 }
 
 #[tokio::test]
@@ -4426,6 +4719,8 @@ async fn multi_agent_v2_wait_agent_non_gemini_ignores_completed_child_without_ma
             timed_out: true,
             statuses: None,
             agent_statuses: None,
+            empty_completions: vec![],
+            wait_again_allowed: None,
         }
     );
     let end_event = last_waiting_end_event(&rx).await;
@@ -4487,6 +4782,8 @@ async fn multi_agent_v2_wait_agent_gemini_returns_immediately_without_live_child
             timed_out: false,
             statuses: Some(HashMap::new()),
             agent_statuses: Some(Vec::new()),
+            empty_completions: vec![],
+            wait_again_allowed: Some(true),
         }
     );
     let end_event = last_waiting_end_event(&rx).await;
@@ -4558,29 +4855,40 @@ async fn spawn_worker(
     turn: &Arc<TurnContext>,
     task_name: &str,
 ) -> (ThreadId, Option<String>, Option<String>, AgentPath) {
-    SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_agent",
-            function_payload(json!({
-                "message": format!("boot {task_name}"),
-                "task_name": task_name,
-            })),
-        ))
-        .await
-        .expect("spawn worker should succeed");
-    let agent_id = session
-        .services
-        .agent_control
-        .resolve_agent_reference(session.thread_id, &turn.session_source, task_name)
-        .await
-        .expect("worker should resolve");
-    let metadata = session
-        .services
-        .agent_control
-        .get_agent_metadata(agent_id)
-        .expect("worker metadata");
+    let parent_path = turn
+        .session_source
+        .get_agent_path()
+        .unwrap_or_else(AgentPath::root);
+    let worker_path = parent_path
+        .join(task_name)
+        .expect("worker path should join");
+    // These tests drive child status transitions explicitly. Queue the initial
+    // communication without starting a model turn so a missing provider credential
+    // cannot race the status under test to `Errored`.
+    let spawned_agent = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
+        (*turn.config).clone(),
+        Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                parent_path,
+                worker_path.clone(),
+                Vec::new(),
+                format!("boot {task_name}"),
+                /*trigger_turn*/ false,
+            ),
+        },
+        Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: session.thread_id,
+            depth: 1,
+            agent_path: Some(worker_path),
+            agent_nickname: None,
+            agent_role: None,
+        })),
+        crate::agent::control::SpawnAgentOptions::default(),
+    ))
+    .await
+    .expect("spawn worker should succeed");
+    let agent_id = spawned_agent.thread_id;
+    let metadata = spawned_agent.metadata;
     (
         agent_id,
         metadata.agent_nickname,
@@ -4590,6 +4898,23 @@ async fn spawn_worker(
 }
 
 async fn complete_worker_turn(manager: &ThreadManager, agent_id: ThreadId, message: &str) {
+    complete_worker_turn_with_report(manager, agent_id, WorkerTurnReport::Present(message)).await;
+}
+
+async fn complete_worker_turn_without_report(manager: &ThreadManager, agent_id: ThreadId) {
+    complete_worker_turn_with_report(manager, agent_id, WorkerTurnReport::Missing).await;
+}
+
+enum WorkerTurnReport<'a> {
+    Present(&'a str),
+    Missing,
+}
+
+async fn complete_worker_turn_with_report(
+    manager: &ThreadManager,
+    agent_id: ThreadId,
+    report: WorkerTurnReport<'_>,
+) {
     let child_thread = manager
         .get_thread(agent_id)
         .await
@@ -4602,7 +4927,10 @@ async fn complete_worker_turn(manager: &ThreadManager, agent_id: ThreadId, messa
             id: child_turn.sub_id.clone(),
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: child_turn.sub_id.clone(),
-                last_agent_message: Some(message.to_string()),
+                last_agent_message: match report {
+                    WorkerTurnReport::Present(message) => Some(message.to_string()),
+                    WorkerTurnReport::Missing => None,
+                },
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -5100,6 +5428,8 @@ async fn multi_agent_v2_wait_agent_gemini_floors_short_explicit_timeout() {
                 (id_b, AgentStatus::Completed(Some("b result".to_string()))),
             ])),
             agent_statuses: Some(expected_agent_statuses),
+            empty_completions: vec![],
+            wait_again_allowed: Some(true),
         }
     );
     assert_eq!(success, None);

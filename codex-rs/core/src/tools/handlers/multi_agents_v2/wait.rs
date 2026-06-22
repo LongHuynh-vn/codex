@@ -189,6 +189,8 @@ impl ToolExecutor<ToolInvocation> for Handler {
                 /*timed_out*/ false,
                 statuses.clone(),
                 &receiver_agents,
+                /*empty_completions*/ Vec::new(),
+                /*wait_again_allowed*/ Some(true),
             );
             send_waiting_end_event(&session, &turn, call_id, statuses, &receiver_agents).await;
             return Ok(boxed_tool_output(result));
@@ -233,13 +235,80 @@ impl ToolExecutor<ToolInvocation> for Handler {
             .all(|agent| statuses.contains_key(&agent.thread_id));
         // timed_out only when the deadline fired and a live child is still non-terminal.
         let timed_out = matches!(wait_outcome, WaitOutcome::TimedOut) && !all_terminal;
-        let result = WaitAgentResult::with_statuses(
-            WaitAgentResult::message_for_timed_out(timed_out).to_string(),
-            timed_out,
-            statuses.clone(),
-            &receiver_agents,
-        );
-        send_waiting_end_event(&session, &turn, call_id, statuses, &receiver_agents).await;
+
+        // Children that finished a turn with no report (terminal `Completed(None)`). These are
+        // the empty-completion trap: they are not running, so re-waiting cannot produce a report.
+        let mut empty_completion_labels = receiver_agents
+            .iter()
+            .filter(|agent| {
+                matches!(
+                    statuses.get(&agent.thread_id),
+                    Some(AgentStatus::Completed(None))
+                )
+            })
+            .map(|agent| {
+                agent
+                    .agent_nickname
+                    .clone()
+                    .unwrap_or_else(|| agent.thread_id.to_string())
+            })
+            .collect::<Vec<_>>();
+        empty_completion_labels.sort_unstable();
+        let has_empty_completion = !empty_completion_labels.is_empty();
+        // Re-waiting only helps while something might still change. It is pointless — and the
+        // model must not do it — once every child is terminal and at least one returned no report.
+        let wait_again_allowed = !(all_terminal && has_empty_completion);
+
+        let message = if timed_out {
+            WaitAgentResult::message_for_timed_out(true).to_string()
+        } else if has_empty_completion {
+            format!(
+                "Wait completed. {} of {} agents are terminal with no report: {}. They are not running — calling wait_agent again returns immediately and cannot produce a report for them. To get a report, send the agent a single concrete follow-up first, then wait again; otherwise proceed with the results you already have. Do not re-spawn these agents.",
+                empty_completion_labels.len(),
+                receiver_agents.len(),
+                empty_completion_labels.join(", ")
+            )
+        } else {
+            WaitAgentResult::message_for_timed_out(false).to_string()
+        };
+
+        // A redundant repeat: the parent re-called wait_agent while every child's terminal status
+        // is byte-identical to the previous wait (no follow-up or status change since). The repeat
+        // would otherwise re-inject the already-delivered report bodies. Record-and-compare is a
+        // single synchronous critical section; the snapshot is refreshed on every wait so any
+        // child leaving `Completed(None)` re-enables a full delivery on the next wait.
+        let was_unchanged = session
+            .services
+            .agent_control
+            .record_wait_delivery_unchanged(session.thread_id, &statuses);
+        let redundant_repeat = !timed_out && has_empty_completion && was_unchanged;
+
+        let (result, end_statuses) = if redundant_repeat {
+            (
+                WaitAgentResult::compact(
+                    message,
+                    empty_completion_labels,
+                    Some(wait_again_allowed),
+                ),
+                // Compact the UI event too: a repeat delivered nothing new, so the TUI must not
+                // re-render the reports. Verified safe — CollabWaitingEnd is not persisted to the
+                // rollout, and every consumer keys off the per-call-unique call_id.
+                HashMap::new(),
+            )
+        } else {
+            (
+                WaitAgentResult::with_statuses(
+                    message,
+                    timed_out,
+                    statuses.clone(),
+                    &receiver_agents,
+                    empty_completion_labels,
+                    Some(wait_again_allowed),
+                ),
+                statuses,
+            )
+        };
+        send_waiting_end_event(&session, &turn, call_id, end_statuses, &receiver_agents).await;
         Ok(boxed_tool_output(result))
     }
 }
@@ -264,6 +333,16 @@ pub(crate) struct WaitAgentResult {
     pub(crate) statuses: Option<HashMap<ThreadId, AgentStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent_statuses: Option<Vec<CollabAgentStatusEntry>>,
+    /// Gemini status path only: labels (agent_nickname else thread id, sorted) of children whose
+    /// final status is `Completed(None)`. Empty — and omitted from the serialized output — on
+    /// every other path, so non-Gemini results stay byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) empty_completions: Vec<String>,
+    /// Gemini status path only: `false` when calling `wait_agent` again now would return
+    /// immediately with no new report (every child is terminal and at least one is
+    /// `Completed(None)`). `None` — and omitted — on every other path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) wait_again_allowed: Option<bool>,
 }
 
 impl WaitAgentResult {
@@ -273,6 +352,8 @@ impl WaitAgentResult {
             timed_out,
             statuses: None,
             agent_statuses: None,
+            empty_completions: Vec::new(),
+            wait_again_allowed: None,
         }
     }
 
@@ -281,6 +362,8 @@ impl WaitAgentResult {
         timed_out: bool,
         statuses: HashMap<ThreadId, AgentStatus>,
         receiver_agents: &[CollabAgentRef],
+        empty_completions: Vec<String>,
+        wait_again_allowed: Option<bool>,
     ) -> Self {
         let agent_statuses = build_wait_agent_statuses(&statuses, receiver_agents);
         Self {
@@ -288,6 +371,26 @@ impl WaitAgentResult {
             timed_out,
             statuses: Some(statuses),
             agent_statuses: Some(agent_statuses),
+            empty_completions,
+            wait_again_allowed,
+        }
+    }
+
+    /// Compact result for a redundant repeat wait on the Gemini status path: the directive and
+    /// the structured `empty_completions` / `wait_again_allowed` signal, but no `statuses` or
+    /// `agent_statuses` — so already-delivered report bodies are not re-injected into the model.
+    fn compact(
+        message: String,
+        empty_completions: Vec<String>,
+        wait_again_allowed: Option<bool>,
+    ) -> Self {
+        Self {
+            message,
+            timed_out: false,
+            statuses: None,
+            agent_statuses: None,
+            empty_completions,
+            wait_again_allowed,
         }
     }
 
