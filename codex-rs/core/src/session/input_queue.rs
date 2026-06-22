@@ -19,10 +19,12 @@ fn mailbox_communication_to_response_item(
     wire_api: WireApi,
 ) -> ResponseItem {
     // `trigger_turn` governs WAKING (set in forward_child_completion_to_parent),
-    // not drain-time formatting. A subagent-notification-shaped Gemini mail must
+    // not drain-time formatting: a subagent-notification-shaped Gemini mail must
     // ALWAYS inject as the clean <subagent_notification> Commentary item when
-    // drained, even when it did not wake the parent (e.g. an empty
-    // `Completed(None)` completion, which queues with trigger_turn:false).
+    // drained, whatever its `trigger_turn`. Cleaning is gated purely on the mail's
+    // shape, never on whether it woke the parent. (Gemini empty `Completed(None)`
+    // completions are suppressed upstream in forward_child_completion_to_parent and
+    // never queue at all; this stays robust for any notification-shaped mail that does.)
     if wire_api == WireApi::GeminiNative && SubagentNotification::matches_text(&mail.content) {
         ResponseItem::Message {
             id: None,
@@ -373,11 +375,14 @@ mod tests {
 
     #[tokio::test]
     async fn input_queue_drains_gemini_queue_only_notification_as_clean_commentary() {
-        // Regression: an empty child completion (`Completed(None)`) queues with
-        // trigger_turn:false so it does not wake an idle parent (see
-        // forward_child_completion_to_parent). It must STILL drain as the clean
-        // <subagent_notification> Commentary item, not the raw transport envelope
-        // that previously leaked into the parent's context and confused the model.
+        // The drain formatter is decoupled from queueing: a `Completed(None)`-bodied
+        // notification mail must STILL drain as the clean <subagent_notification>
+        // Commentary item, not the raw transport envelope that previously leaked into
+        // the parent's context and confused the model. On Gemini,
+        // forward_child_completion_to_parent now suppresses the empty-completion
+        // notification at the source so it never queues — but the formatter must remain
+        // robust for any notification-shaped mail that reaches it, so we exercise the
+        // empty-body shape directly here.
         let input_queue = InputQueue::new();
         let notification = crate::session_prefix::format_subagent_notification_message(
             "/root/worker",

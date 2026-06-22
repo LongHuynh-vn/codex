@@ -1775,6 +1775,18 @@ impl Session {
         child_agent_path: &codex_protocol::AgentPath,
         status: AgentStatus,
     ) {
+        // On Gemini, an empty completion (`Completed(None)`) carries no report. Its
+        // `{"completed":null}` notification is pure noise that made the parent spin and
+        // overshoot its goal budget, so deliver nothing. The parent still learns the child is
+        // terminal-with-no-report from `wait_agent` (`empty_completions` / `wait_again_allowed`),
+        // which polls child status directly — so nothing is stranded. Non-Gemini wire APIs and
+        // `Completed(Some(_))` keep delivering exactly as before.
+        if turn_context.provider.info().wire_api == WireApi::GeminiNative
+            && matches!(status, AgentStatus::Completed(None))
+        {
+            return;
+        }
+
         let Some(parent_agent_path) = child_agent_path
             .as_str()
             .rsplit_once('/')
@@ -1792,12 +1804,11 @@ impl Session {
             .is_enabled()
             .then(|| message.clone());
         // On Gemini, wake an idle parent so it collects and synthesizes child
-        // completions without a user follow-up — but NOT for an empty completion
-        // (`Completed(None)`), whose null body is pure noise and only causes the
-        // parent to spin and overshoot its goal budget. Other wire APIs keep the
-        // prior queue-only behavior (the parent stays idle until its next turn).
-        let trigger_turn = turn_context.provider.info().wire_api == WireApi::GeminiNative
-            && !matches!(status, AgentStatus::Completed(None));
+        // completions without a user follow-up. Empty completions (`Completed(None)`)
+        // already returned above, so anything reaching here carries a report. Other
+        // wire APIs keep the prior queue-only behavior (the parent stays idle until
+        // its next turn).
+        let trigger_turn = turn_context.provider.info().wire_api == WireApi::GeminiNative;
         let communication = InterAgentCommunication::new(
             child_agent_path.clone(),
             parent_agent_path,

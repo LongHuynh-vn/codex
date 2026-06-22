@@ -1830,6 +1830,13 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     ));
 }
 
+/// Whether a child completion should be delivered to the parent, and with what
+/// `trigger_turn`, or suppressed entirely (Gemini empty completions).
+enum ChildCompletionExpectation {
+    Queued { trigger_turn: bool },
+    Suppressed,
+}
+
 /// Drives a real V2 `ThreadSpawn` child (tester) to `TurnComplete` under a LIVE
 /// direct parent (worker) via path (a) — `send_event` ->
 /// `maybe_notify_parent_of_terminal_turn` -> `forward_child_completion_to_parent`
@@ -1842,7 +1849,7 @@ async fn assert_v2_child_completion_trigger_turn(
     provider: ModelProviderInfo,
     provider_id: &str,
     last_agent_message: Option<String>,
-    expected_trigger_turn: bool,
+    expectation: ChildCompletionExpectation,
 ) {
     let expected_wire_api = provider.wire_api;
     let harness = AgentControlHarness::with_provider(provider, provider_id).await;
@@ -1915,42 +1922,73 @@ async fn assert_v2_child_completion_trigger_turn(
         )
         .await;
 
-    let expected_message = crate::session_prefix::format_subagent_notification_message(
-        tester_path.as_str(),
-        &AgentStatus::Completed(last_agent_message),
-    );
-    let expected = (
-        worker_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                tester_path.clone(),
-                worker_path.clone(),
-                Vec::new(),
-                expected_message,
-                expected_trigger_turn,
-            ),
-        },
-    );
+    match expectation {
+        ChildCompletionExpectation::Queued { trigger_turn } => {
+            let expected_message = crate::session_prefix::format_subagent_notification_message(
+                tester_path.as_str(),
+                &AgentStatus::Completed(last_agent_message),
+            );
+            let expected = (
+                worker_thread_id,
+                Op::InterAgentCommunication {
+                    communication: InterAgentCommunication::new(
+                        tester_path.clone(),
+                        worker_path.clone(),
+                        Vec::new(),
+                        expected_message,
+                        trigger_turn,
+                    ),
+                },
+            );
 
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if harness
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if harness
+                        .manager
+                        .captured_ops()
+                        .into_iter()
+                        .any(|entry| entry == expected)
+                    {
+                        break;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "expected child completion op to direct parent with trigger_turn={trigger_turn}"
+                )
+            });
+        }
+        ChildCompletionExpectation::Suppressed => {
+            // `send_event` awaited the full forward chain
+            // (`maybe_notify_parent_of_terminal_turn` -> `forward_child_completion_to_parent`
+            // -> `send_inter_agent_communication` -> `send_op`), and `send_op` records the op
+            // into `captured_ops` synchronously before returning. On Gemini a `Completed(None)`
+            // completion returns early before `send_inter_agent_communication`, so no op is ever
+            // recorded — there is nothing to poll for and no race. Confirm the child actually
+            // reached the terminal empty status (so absence is due to suppression, not a dropped
+            // event), then assert that no notification was directed at the parent.
+            assert_eq!(
+                harness.control.get_status(tester_thread_id).await,
+                AgentStatus::Completed(None),
+            );
+            let parent_notifications: Vec<_> = harness
                 .manager
                 .captured_ops()
                 .into_iter()
-                .any(|entry| entry == expected)
-            {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
+                .filter(|(thread_id, op)| {
+                    *thread_id == worker_thread_id
+                        && matches!(op, Op::InterAgentCommunication { .. })
+                })
+                .collect();
+            assert!(
+                parent_notifications.is_empty(),
+                "expected no child-completion notification to the parent, got: {parent_notifications:?}"
+            );
         }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "expected child completion op to direct parent with trigger_turn={expected_trigger_turn}"
-        )
-    });
+    }
 }
 
 #[tokio::test]
@@ -1959,21 +1997,23 @@ async fn multi_agent_v2_gemini_child_completion_wakes_idle_parent() {
         ModelProviderInfo::create_gemini_provider(),
         GEMINI_PROVIDER_ID,
         /*last_agent_message*/ Some("done".to_string()),
-        /*expected_trigger_turn*/ true,
+        ChildCompletionExpectation::Queued { trigger_turn: true },
     )
     .await;
 }
 
 #[tokio::test]
-async fn multi_agent_v2_gemini_empty_child_completion_does_not_wake_idle_parent() {
-    // An empty completion (`Completed(None)`) carries no report body; on Gemini
-    // it must NOT wake the idle parent, even though the notification is still
-    // queued for the parent's next turn.
+async fn multi_agent_v2_gemini_empty_child_completion_does_not_notify_idle_parent() {
+    // An empty completion (`Completed(None)`) carries no report body; on Gemini its
+    // `{"completed":null}` notification is pure noise, so it is suppressed entirely —
+    // nothing is delivered to the parent (which strictly implies the idle parent is
+    // not woken). The parent still learns the child is terminal-with-no-report via
+    // `wait_agent`, which polls child status directly.
     assert_v2_child_completion_trigger_turn(
         ModelProviderInfo::create_gemini_provider(),
         GEMINI_PROVIDER_ID,
         /*last_agent_message*/ None,
-        /*expected_trigger_turn*/ false,
+        ChildCompletionExpectation::Suppressed,
     )
     .await;
 }
@@ -1985,20 +2025,25 @@ async fn multi_agent_v2_non_gemini_child_completion_does_not_wake_idle_parent() 
         provider,
         OPENAI_PROVIDER_ID,
         /*last_agent_message*/ Some("done".to_string()),
-        /*expected_trigger_turn*/ false,
+        ChildCompletionExpectation::Queued {
+            trigger_turn: false,
+        },
     )
     .await;
 }
 
 #[tokio::test]
 async fn multi_agent_v2_non_gemini_empty_child_completion_does_not_wake_idle_parent() {
-    // Non-Gemini providers stay queue-only for empty completions as well.
+    // Non-Gemini providers stay queue-only for empty completions as well: the
+    // notification is still queued (with trigger_turn:false), only Gemini suppresses it.
     let provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     assert_v2_child_completion_trigger_turn(
         provider,
         OPENAI_PROVIDER_ID,
         /*last_agent_message*/ None,
-        /*expected_trigger_turn*/ false,
+        ChildCompletionExpectation::Queued {
+            trigger_turn: false,
+        },
     )
     .await;
 }
