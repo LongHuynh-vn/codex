@@ -543,14 +543,6 @@ fn wait_output_schema_v2(output_mode: WaitAgentV2OutputMode) -> Value {
         && let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut)
     {
         properties.insert(
-            "statuses".to_string(),
-            json!({
-                "type": "object",
-                "description": "Final statuses keyed by agent id.",
-                "additionalProperties": agent_status_output_schema()
-            }),
-        );
-        properties.insert(
             "agent_statuses".to_string(),
             json!({
                 "type": "array",
@@ -578,6 +570,23 @@ fn wait_output_schema_v2(output_mode: WaitAgentV2OutputMode) -> Value {
                     "required": ["thread_id", "status"],
                     "additionalProperties": false
                 }
+            }),
+        );
+        properties.insert(
+            "empty_completions".to_string(),
+            json!({
+                "type": "array",
+                "description": "Labels of children whose final status is a completion with no report. They are not running, so waiting again cannot produce a report for them.",
+                "items": {
+                    "type": "string"
+                }
+            }),
+        );
+        properties.insert(
+            "wait_again_allowed".to_string(),
+            json!({
+                "type": "boolean",
+                "description": "False when calling wait_agent again now would return immediately with no new report (every child is terminal and at least one finished with no report)."
             }),
         );
     }

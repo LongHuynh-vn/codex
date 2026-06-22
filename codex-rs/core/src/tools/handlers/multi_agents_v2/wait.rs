@@ -297,10 +297,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
             )
         } else {
             (
-                WaitAgentResult::with_statuses(
+                WaitAgentResult::gemini_full_delivery(
                     message,
                     timed_out,
-                    statuses.clone(),
+                    &statuses,
                     &receiver_agents,
                     empty_completion_labels,
                     Some(wait_again_allowed),
@@ -370,6 +370,29 @@ impl WaitAgentResult {
             message,
             timed_out,
             statuses: Some(statuses),
+            agent_statuses: Some(agent_statuses),
+            empty_completions,
+            wait_again_allowed,
+        }
+    }
+
+    /// Full delivery on the Gemini status path: carry child statuses (incl. report bodies)
+    /// to the model **only** via `agent_statuses`, dropping the redundant `statuses` copy that
+    /// no consumer reads. The map is borrowed (the caller still owns it for the non-persisted UI
+    /// `CollabWaitingEnd` event), so this also avoids a `statuses.clone()` at the call site.
+    fn gemini_full_delivery(
+        message: String,
+        timed_out: bool,
+        statuses: &HashMap<ThreadId, AgentStatus>,
+        receiver_agents: &[CollabAgentRef],
+        empty_completions: Vec<String>,
+        wait_again_allowed: Option<bool>,
+    ) -> Self {
+        let agent_statuses = build_wait_agent_statuses(statuses, receiver_agents);
+        Self {
+            message,
+            timed_out,
+            statuses: None,
             agent_statuses: Some(agent_statuses),
             empty_completions,
             wait_again_allowed,

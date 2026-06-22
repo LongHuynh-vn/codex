@@ -4276,7 +4276,9 @@ async fn multi_agent_v2_wait_agent_gemini_keeps_plain_message_for_bodied_complet
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
             timed_out: false,
-            statuses: Some(expected_statuses.clone()),
+            // Gemini full delivery drops the redundant `statuses` copy; the child body now
+            // reaches the model only via `agent_statuses` (asserted below).
+            statuses: None,
             agent_statuses: Some(expected_agent_statuses.clone()),
             empty_completions: vec![],
             wait_again_allowed: Some(true),
@@ -4296,6 +4298,63 @@ async fn multi_agent_v2_wait_agent_gemini_keeps_plain_message_for_bodied_complet
             expected_agent_statuses,
             expected_statuses,
         )
+    );
+    assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_gemini_full_delivery_omits_statuses_keeps_agent_statuses() {
+    const MARKER: &str = "FULL_DELIVERY_REPORT_BODY_MARKER";
+    let (session, turn, _rx, manager) = gemini_wait_setup().await;
+    let (agent_id, agent_nickname, agent_role, _path) =
+        spawn_worker(&session, &turn, "worker").await;
+    complete_worker_turn(&manager, agent_id, MARKER).await;
+
+    let output = timeout(
+        Duration::from_millis(500),
+        WaitAgentHandlerV2::new_with_output_mode(
+            WaitAgentTimeoutOptions::default(),
+            WaitAgentV2OutputMode::GeminiStatuses,
+        )
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({"timeout_ms": 10_000})),
+        )),
+    )
+    .await
+    .expect("completed child status should unblock wait_agent")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+
+    // Byte-level: the redundant `statuses` field is gone, while `agent_statuses` and the report
+    // body are present. `"statuses":` (quote-prefixed) cannot appear inside `"agent_statuses":`
+    // because the byte before `statuses` there is `_`, not `"`, so this check is unambiguous.
+    assert!(
+        !content.contains(r#""statuses":"#),
+        "Gemini full delivery must not serialize a `statuses` field: {content}"
+    );
+    assert!(
+        content.contains(r#""agent_statuses":"#),
+        "Gemini full delivery must serialize `agent_statuses`: {content}"
+    );
+    assert!(
+        content.contains(MARKER),
+        "the child report body must reach the model via agent_statuses: {content}"
+    );
+
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert!(result.statuses.is_none());
+    assert_eq!(
+        result.agent_statuses,
+        Some(vec![CollabAgentStatusEntry {
+            thread_id: agent_id,
+            agent_nickname,
+            agent_role,
+            status: AgentStatus::Completed(Some(MARKER.to_string())),
+        }])
     );
     assert_eq!(success, None);
 }
@@ -4342,7 +4401,7 @@ async fn multi_agent_v2_wait_agent_gemini_directs_parent_after_empty_completion(
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message,
             timed_out: false,
-            statuses: Some(HashMap::from([(agent_id, AgentStatus::Completed(None))])),
+            statuses: None,
             agent_statuses: Some(vec![CollabAgentStatusEntry {
                 thread_id: agent_id,
                 agent_nickname,
@@ -4391,13 +4450,6 @@ async fn multi_agent_v2_wait_agent_gemini_names_only_empty_completion_in_mixed_r
     let expected_message = format!(
         "Wait completed. 1 of 2 agents are terminal with no report: {empty_label}. They are not running — calling wait_agent again returns immediately and cannot produce a report for them. To get a report, send the agent a single concrete follow-up first, then wait again; otherwise proceed with the results you already have. Do not re-spawn these agents."
     );
-    let expected_statuses = HashMap::from([
-        (
-            bodied_id,
-            AgentStatus::Completed(Some("bodied result".to_string())),
-        ),
-        (empty_id, AgentStatus::Completed(None)),
-    ]);
     let mut agent_statuses = result
         .agent_statuses
         .take()
@@ -4424,7 +4476,7 @@ async fn multi_agent_v2_wait_agent_gemini_names_only_empty_completion_in_mixed_r
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: expected_message,
             timed_out: false,
-            statuses: Some(expected_statuses),
+            statuses: None,
             agent_statuses: Some(expected_agent_statuses),
             empty_completions: vec![empty_label],
             wait_again_allowed: Some(false),
@@ -4467,11 +4519,9 @@ async fn multi_agent_v2_wait_agent_gemini_empty_completion_sets_structured_signa
     // wait_again_allowed is false (re-waiting would return immediately with no new report).
     assert_eq!(result.empty_completions, vec![display_label]);
     assert_eq!(result.wait_again_allowed, Some(false));
-    // The statuses / agent_statuses payloads are unchanged — Change 1 only adds sibling fields.
-    assert_eq!(
-        result.statuses,
-        Some(HashMap::from([(agent_id, AgentStatus::Completed(None))]))
-    );
+    // Gemini full delivery drops the redundant `statuses` copy; the child status reaches the
+    // model only via `agent_statuses`.
+    assert_eq!(result.statuses, None);
     assert_eq!(
         result.agent_statuses,
         Some(vec![CollabAgentStatusEntry {
@@ -4519,7 +4569,10 @@ async fn multi_agent_v2_wait_agent_gemini_redundant_repeat_returns_compact() {
     );
     let first_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&first_content).expect("wait_agent result should be json");
-    assert!(first_result.statuses.is_some());
+    // Full delivery drops the redundant `statuses` copy; the bodied report reaches the model via
+    // `agent_statuses` (proven by the BODIED_REPORT_BODY_MARKER content assert above).
+    assert!(first_result.statuses.is_none());
+    assert!(first_result.agent_statuses.is_some());
     assert_eq!(first_result.empty_completions, vec![empty_label.clone()]);
     assert_eq!(first_result.wait_again_allowed, Some(false));
 
@@ -4560,10 +4613,12 @@ async fn multi_agent_v2_wait_agent_gemini_redundant_repeat_returns_compact() {
 #[tokio::test]
 async fn multi_agent_v2_wait_agent_gemini_followup_reenables_full_delivery() {
     let (session, turn, _rx, manager) = gemini_wait_setup().await;
-    let (agent_id, agent_nickname, _agent_role, _path) =
+    let (agent_id, agent_nickname, agent_role, _path) =
         spawn_worker(&session, &turn, "worker").await;
     complete_worker_turn_without_report(&manager, agent_id).await;
-    let display_label = agent_nickname.unwrap_or_else(|| agent_id.to_string());
+    let display_label = agent_nickname
+        .clone()
+        .unwrap_or_else(|| agent_id.to_string());
 
     // First wait: empty completion → directive, wait_again_allowed false.
     let first = timeout(
@@ -4616,12 +4671,17 @@ async fn multi_agent_v2_wait_agent_gemini_followup_reenables_full_delivery() {
     );
     let second_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&second_content).expect("wait_agent result should be json");
+    // Full delivery drops the redundant `statuses` copy; the new report reaches the model via
+    // `agent_statuses` only.
+    assert_eq!(second_result.statuses, None);
     assert_eq!(
-        second_result.statuses,
-        Some(HashMap::from([(
-            agent_id,
-            AgentStatus::Completed(Some("report after followup".to_string()))
-        )]))
+        second_result.agent_statuses,
+        Some(vec![CollabAgentStatusEntry {
+            thread_id: agent_id,
+            agent_nickname,
+            agent_role,
+            status: AgentStatus::Completed(Some("report after followup".to_string())),
+        }])
     );
     assert_eq!(second_result.empty_completions, Vec::<String>::new());
     assert_eq!(second_result.wait_again_allowed, Some(true));
@@ -5304,13 +5364,9 @@ async fn multi_agent_v2_wait_agent_gemini_blocks_until_all_children_terminal() {
 
     assert_eq!(result.message, "Wait completed.".to_string());
     assert!(!result.timed_out);
-    assert_eq!(
-        result.statuses,
-        Some(HashMap::from([
-            (id_a, AgentStatus::Completed(Some("a result".to_string()))),
-            (id_b, AgentStatus::Completed(Some("b result".to_string()))),
-        ]))
-    );
+    // Full delivery drops the redundant `statuses` copy; both bodies reach the model via
+    // `agent_statuses` (asserted below).
+    assert_eq!(result.statuses, None);
 
     let mut agent_statuses = result.agent_statuses.expect("agent statuses present");
     agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
@@ -5423,10 +5479,7 @@ async fn multi_agent_v2_wait_agent_gemini_floors_short_explicit_timeout() {
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
             message: "Wait completed.".to_string(),
             timed_out: false,
-            statuses: Some(HashMap::from([
-                (id_a, AgentStatus::Completed(Some("a result".to_string()))),
-                (id_b, AgentStatus::Completed(Some("b result".to_string()))),
-            ])),
+            statuses: None,
             agent_statuses: Some(expected_agent_statuses),
             empty_completions: vec![],
             wait_again_allowed: Some(true),
@@ -5439,8 +5492,8 @@ async fn multi_agent_v2_wait_agent_gemini_floors_short_explicit_timeout() {
 async fn multi_agent_v2_wait_agent_gemini_ignores_spurious_mailbox_notification() {
     let (session, turn, _rx, manager) = gemini_wait_setup().await;
 
-    let (id_a, _nick_a, _role_a, path_a) = spawn_worker(&session, &turn, "worker_a").await;
-    let (id_b, _nick_b, _role_b, _path_b) = spawn_worker(&session, &turn, "worker_b").await;
+    let (id_a, nick_a, role_a, path_a) = spawn_worker(&session, &turn, "worker_a").await;
+    let (id_b, nick_b, role_b, _path_b) = spawn_worker(&session, &turn, "worker_b").await;
 
     complete_worker_turn(&manager, id_a, "a result").await;
 
@@ -5495,13 +5548,27 @@ async fn multi_agent_v2_wait_agent_gemini_ignores_spurious_mailbox_notification(
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert!(!result.timed_out);
     assert_eq!(result.message, "Wait completed.".to_string());
-    assert_eq!(
-        result.statuses,
-        Some(HashMap::from([
-            (id_a, AgentStatus::Completed(Some("a result".to_string()))),
-            (id_b, AgentStatus::Completed(Some("b result".to_string()))),
-        ]))
-    );
+    // Full delivery drops the redundant `statuses` copy; both bodies reach the model via
+    // `agent_statuses` only.
+    assert_eq!(result.statuses, None);
+    let mut agent_statuses = result.agent_statuses.expect("agent statuses present");
+    agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    let mut expected_agent_statuses = vec![
+        CollabAgentStatusEntry {
+            thread_id: id_a,
+            agent_nickname: nick_a,
+            agent_role: role_a,
+            status: AgentStatus::Completed(Some("a result".to_string())),
+        },
+        CollabAgentStatusEntry {
+            thread_id: id_b,
+            agent_nickname: nick_b,
+            agent_role: role_b,
+            status: AgentStatus::Completed(Some("b result".to_string())),
+        },
+    ];
+    expected_agent_statuses.sort_by_key(|entry| entry.thread_id.to_string());
+    assert_eq!(agent_statuses, expected_agent_statuses);
 }
 
 #[tokio::test]
@@ -5548,14 +5615,9 @@ async fn multi_agent_v2_wait_agent_gemini_times_out_with_partial_statuses() {
         "deadline should fire while worker_b is still running"
     );
     assert_eq!(result.message, "Wait timed out.".to_string());
-    // Only the terminal child is reported on timeout.
-    assert_eq!(
-        result.statuses,
-        Some(HashMap::from([(
-            id_a,
-            AgentStatus::Completed(Some("a result".to_string()))
-        )]))
-    );
+    // Full delivery drops the redundant `statuses` copy; only the terminal child is reported on
+    // timeout, and it reaches the model via `agent_statuses` only.
+    assert_eq!(result.statuses, None);
     assert_eq!(
         result.agent_statuses,
         Some(vec![CollabAgentStatusEntry {

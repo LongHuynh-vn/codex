@@ -375,10 +375,13 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
     );
     assert!(output_schema["properties"]["statuses"].is_null());
     assert!(output_schema["properties"]["agent_statuses"].is_null());
+    // The Gemini-only structured signal fields stay strictly inside the GeminiStatuses branch.
+    assert!(output_schema["properties"]["empty_completions"].is_null());
+    assert!(output_schema["properties"]["wait_again_allowed"].is_null());
 }
 
 #[test]
-fn wait_agent_tool_v2_gemini_status_output_includes_status_fields() {
+fn wait_agent_tool_v2_gemini_status_output_omits_statuses_keeps_agent_statuses() {
     let ToolSpec::Function(ResponsesApiTool {
         parameters,
         output_schema,
@@ -402,13 +405,26 @@ fn wait_agent_tool_v2_gemini_status_output_includes_status_fields() {
     assert!(properties.contains_key("timeout_ms"));
 
     let output_schema = output_schema.expect("wait output schema");
-    assert_eq!(
-        output_schema["properties"]["statuses"]["description"],
-        json!("Final statuses keyed by agent id.")
-    );
+    // The redundant `statuses` property is gone; child statuses are declared only via
+    // `agent_statuses`.
+    assert!(output_schema["properties"]["statuses"].is_null());
     assert_eq!(
         output_schema["properties"]["agent_statuses"]["items"]["required"],
         json!(["thread_id", "status"])
+    );
+    // The Gemini status path also emits these structured signal fields; the schema declares them
+    // so it matches the actual output.
+    assert_eq!(
+        output_schema["properties"]["empty_completions"]["type"],
+        json!("array")
+    );
+    assert_eq!(
+        output_schema["properties"]["empty_completions"]["items"]["type"],
+        json!("string")
+    );
+    assert_eq!(
+        output_schema["properties"]["wait_again_allowed"]["type"],
+        json!("boolean")
     );
     assert_eq!(output_schema["required"], json!(["message", "timed_out"]));
 }
