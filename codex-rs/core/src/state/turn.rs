@@ -96,6 +96,13 @@ pub(crate) struct TurnState {
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
     pub(crate) gemini_spawned_subagent_last_send_message_to_root: Option<String>,
+    /// Set when this turn invoked any of the orchestrator re-engagement tools
+    /// (`spawn_agent`, `followup_task`, `send_message`). Read at turn-end to
+    /// gate Gemini orchestration auto-completion: a turn that re-engaged a
+    /// child must never auto-complete the goal (it may have re-opened a child
+    /// whose later empty completion is suppressed, which would strand the
+    /// anti-stall backstop). Per-turn state, so it resets each turn.
+    pub(crate) reengaged_child_this_turn: bool,
 }
 
 pub(crate) struct PendingRequestPermissions {

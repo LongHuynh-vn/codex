@@ -72,6 +72,12 @@ pub(crate) async fn handle_message_string_tool(
         call_id,
         ..
     } = invocation;
+    // Mark the turn as having re-engaged a child (both `send_message` and
+    // `followup_task` route through here) so a same-turn synthesis can never
+    // auto-complete the orchestration goal. Set unconditionally and early so an
+    // errored message still counts — conservatively safe for the anti-stall
+    // backstop.
+    session.mark_reengaged_child_this_turn(turn.as_ref()).await;
     let receiver_thread_id = resolve_agent_target(&session, &turn, &target).await?;
     let receiver_agent = session
         .services

@@ -10,6 +10,17 @@ static CONTINUATION_PROMPT_TEMPLATE: LazyLock<Template> =
         },
     );
 
+static ORCHESTRATION_CONTINUATION_PROMPT_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
+    match Template::parse(include_str!(
+        "../templates/goals/orchestration_continuation.md"
+    )) {
+        Ok(template) => template,
+        Err(err) => {
+            panic!("embedded goals/orchestration_continuation.md template is invalid: {err}")
+        }
+    }
+});
+
 static BUDGET_LIMIT_PROMPT_TEMPLATE: LazyLock<Template> =
     LazyLock::new(
         || match Template::parse(include_str!("../templates/goals/budget_limit.md")) {
@@ -49,6 +60,38 @@ pub fn continuation_prompt(goal: &ThreadGoal) -> String {
     ]) {
         Ok(prompt) => prompt,
         Err(err) => panic!("embedded goals/continuation.md template failed to render: {err}"),
+    }
+}
+
+/// Builds the hidden prompt used to continue an active **orchestration** goal
+/// (one auto-armed by a Gemini-native root orchestrator). Unlike
+/// [`continuation_prompt`], this tells the orchestrator to treat children's
+/// reports as authoritative and to stop once everything has reported and the
+/// consolidated answer was delivered — removing the solo-worker prompt's
+/// "completion is unproven / re-verify / improve-replace existing work"
+/// pressure that drives over-management.
+pub fn orchestration_continuation_prompt(goal: &ThreadGoal) -> String {
+    let token_budget = goal
+        .token_budget
+        .map(|budget| budget.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let remaining_tokens = goal
+        .token_budget
+        .map(|budget| (budget - goal.tokens_used).max(0).to_string())
+        .unwrap_or_else(|| "unbounded".to_string());
+    let tokens_used = goal.tokens_used.to_string();
+    let objective = escape_xml_text(&goal.objective);
+
+    match ORCHESTRATION_CONTINUATION_PROMPT_TEMPLATE.render([
+        ("objective", objective.as_str()),
+        ("tokens_used", tokens_used.as_str()),
+        ("token_budget", token_budget.as_str()),
+        ("remaining_tokens", remaining_tokens.as_str()),
+    ]) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            panic!("embedded goals/orchestration_continuation.md template failed to render: {err}")
+        }
     }
 }
 

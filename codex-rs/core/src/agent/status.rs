@@ -26,3 +26,22 @@ pub(crate) fn is_final(status: &AgentStatus) -> bool {
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
     )
 }
+
+/// Stricter than [`is_final`]: a child is only "done" for orchestration
+/// auto-completion purposes when it reached a genuinely terminal, settled
+/// state. Unlike `is_final`, this treats `NotFound` as **not** done so a
+/// transiently-unregistered or mid-spawn child can never be mistaken for a
+/// finished one. The not-done set is exactly
+/// `{NotFound, PendingInit, Running, Interrupted}`.
+///
+/// `Shutdown` is matched for safety/future-proofing, but is currently
+/// unreachable as an *observed* status: shutting a child down removes it from
+/// `open_thread_spawn_children`, so shut-down children are handled by the
+/// empty-list (vacuously-terminal) case at the call site instead. The
+/// reachable terminal states for enumerable children are `Completed`/`Errored`.
+pub(crate) fn is_conservatively_terminal(status: &AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::Completed(_) | AgentStatus::Errored(_) | AgentStatus::Shutdown
+    )
+}

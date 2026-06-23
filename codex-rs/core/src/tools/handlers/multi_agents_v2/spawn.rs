@@ -65,6 +65,10 @@ async fn handle_spawn_agent(
         call_id,
         ..
     } = invocation;
+    // Mark the turn as having re-engaged a child so a same-turn synthesis can
+    // never auto-complete the orchestration goal (set on invocation, before any
+    // early return, so an errored spawn still counts — conservatively safe).
+    session.mark_reengaged_child_this_turn(turn.as_ref()).await;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let is_gemini_native = turn.provider.info().wire_api == WireApi::GeminiNative;
@@ -272,7 +276,7 @@ async fn maybe_auto_arm_gemini_orchestration_goal(session: &Arc<Session>, turn: 
     }
 
     let objective = gemini_orchestration_auto_goal_objective(session.as_ref()).await;
-    if let Err(err) = session
+    match session
         .create_thread_goal(
             turn,
             CreateGoalRequest {
@@ -282,20 +286,29 @@ async fn maybe_auto_arm_gemini_orchestration_goal(session: &Arc<Session>, turn: 
         )
         .await
     {
-        if err
-            .chain()
-            .any(|cause| cause.to_string().contains("already has a goal"))
-        {
-            tracing::debug!(
-                "skipping Gemini orchestration auto-goal because a goal already exists"
-            );
-        } else {
-            tracing::debug!("failed to auto-arm Gemini orchestration goal: {err}");
+        Ok(_goal) => {
+            // Record provenance so the goal can later be structurally
+            // auto-completed (and given the orchestration continuation prompt).
+            // Only a goal we auto-armed is ever eligible — a user-created goal
+            // is never auto-completed.
+            session.mark_auto_armed_orchestration_goal().await;
+        }
+        Err(err) => {
+            if err
+                .chain()
+                .any(|cause| cause.to_string().contains("already has a goal"))
+            {
+                tracing::debug!(
+                    "skipping Gemini orchestration auto-goal because a goal already exists"
+                );
+            } else {
+                tracing::debug!("failed to auto-arm Gemini orchestration goal: {err}");
+            }
         }
     }
 }
 
-fn is_root_orchestrator_source(session_source: &SessionSource) -> bool {
+pub(crate) fn is_root_orchestrator_source(session_source: &SessionSource) -> bool {
     match session_source {
         SessionSource::Cli
         | SessionSource::VSCode

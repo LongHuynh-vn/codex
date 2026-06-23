@@ -598,14 +598,23 @@ impl Session {
             .input_queue
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await;
-        let (turn_had_memory_citation, turn_tool_calls, token_usage_at_turn_start) = {
+        let (
+            turn_had_memory_citation,
+            turn_tool_calls,
+            token_usage_at_turn_start,
+            reengaged_child_this_turn,
+        ) = {
             let ts = turn_state.lock().await;
             (
                 ts.has_memory_citation,
                 ts.tool_calls,
                 ts.token_usage_at_turn_start.clone(),
+                ts.reengaged_child_this_turn,
             )
         };
+        // Whether this turn emitted a final-channel answer. Capture before
+        // `last_agent_message` is moved into the TurnComplete event below.
+        let emitted_final_answer = last_agent_message.is_some();
         if !pending_input.is_empty() {
             for pending_input_item in pending_input {
                 let hook_outcome =
@@ -794,6 +803,17 @@ impl Session {
         if !cleared_active_turn {
             return;
         }
+        // Structurally complete a finished Gemini orchestration goal before the
+        // idle-continuation backstop runs, so it doesn't re-engage an
+        // already-done orchestrator. Gemini-gated; a no-op otherwise. Must run
+        // before MaybeContinueIfIdle so completing the goal makes the
+        // continuation candidate short-circuit on `status != Active`.
+        self.maybe_auto_complete_gemini_orchestration_goal(
+            turn_context.as_ref(),
+            emitted_final_answer,
+            reengaged_child_this_turn,
+        )
+        .await;
         if let Err(err) = self
             .goal_runtime_apply(GoalRuntimeEvent::MaybeContinueIfIdle)
             .await

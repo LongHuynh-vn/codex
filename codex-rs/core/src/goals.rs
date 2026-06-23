@@ -5,6 +5,7 @@
 //! events, and owns helper hooks used by goal lifecycle behavior.
 
 use crate::StateDbHandle;
+use crate::agent::status::is_conservatively_terminal;
 use crate::context::ContextualUserFragment;
 use crate::context::InternalContextSource;
 use crate::context::InternalModelContextFragment;
@@ -15,8 +16,10 @@ use crate::state::ActiveTurn;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
 use crate::tools::handlers::goal_spec::UPDATE_GOAL_TOOL_NAME;
+use crate::tools::handlers::multi_agents_v2::is_root_orchestrator_source;
 use anyhow::Context;
 use codex_features::Feature;
+use codex_model_provider_info::WireApi;
 use codex_otel::GOAL_BLOCKED_METRIC;
 use codex_otel::GOAL_BUDGET_LIMITED_METRIC;
 use codex_otel::GOAL_COMPLETED_METRIC;
@@ -28,9 +31,11 @@ use codex_otel::GOAL_USAGE_LIMITED_METRIC;
 use codex_prompts::budget_limit_prompt;
 use codex_prompts::continuation_prompt;
 use codex_prompts::objective_updated_prompt;
+use codex_prompts::orchestration_continuation_prompt;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
@@ -147,6 +152,14 @@ pub(crate) enum GoalRuntimeEvent<'a> {
 pub(crate) struct GoalRuntimeState {
     pub(crate) state_db: Mutex<Option<StateDbHandle>>,
     pub(crate) budget_limit_reported_goal_id: Mutex<Option<String>>,
+    /// Goal id of the goal that was auto-armed by a Gemini-native root
+    /// orchestrator on its first `spawn_agent`. Provenance marker: only a goal
+    /// recorded here may be structurally auto-completed or receive the
+    /// orchestration continuation prompt — a user-created goal is never
+    /// auto-completed. In-memory runtime only (no schema change); set once at
+    /// auto-arm and keyed by exact goal id, so a replaced/different goal never
+    /// matches.
+    pub(crate) auto_armed_orchestration_goal_id: Mutex<Option<String>>,
     accounting_lock: Semaphore,
     accounting: Mutex<GoalAccountingSnapshot>,
     pub(crate) continuation_lock: Semaphore,
@@ -162,6 +175,7 @@ impl GoalRuntimeState {
         Self {
             state_db: Mutex::new(None),
             budget_limit_reported_goal_id: Mutex::new(None),
+            auto_armed_orchestration_goal_id: Mutex::new(None),
             accounting_lock: Semaphore::new(/*permits*/ 1),
             accounting: Mutex::new(GoalAccountingSnapshot::new()),
             continuation_lock: Semaphore::new(/*permits*/ 1),
@@ -406,6 +420,48 @@ impl Session {
             .get_thread_goal(self.thread_id)
             .await
             .map(|goal| goal.map(protocol_goal_from_state))
+    }
+
+    /// Records the goal auto-armed by a Gemini-native root orchestrator as the
+    /// orchestration goal eligible for structural auto-completion and the
+    /// orchestration continuation prompt. Reads the freshly-created goal's id
+    /// from state (the protocol `ThreadGoal` returned by `create_thread_goal`
+    /// does not carry it). Set once at auto-arm; keyed by the exact goal id so a
+    /// replaced/user goal never matches.
+    pub(crate) async fn mark_auto_armed_orchestration_goal(&self) {
+        let goal_id = match self.state_db_for_thread_goals().await {
+            Ok(Some(state_db)) => match state_db.thread_goals().get_thread_goal(self.thread_id).await
+            {
+                Ok(Some(goal)) => goal.goal_id,
+                Ok(None) => return,
+                Err(err) => {
+                    tracing::debug!("failed to read auto-armed orchestration goal id: {err}");
+                    return;
+                }
+            },
+            Ok(None) => return,
+            Err(err) => {
+                tracing::debug!(
+                    "failed to open state db to record auto-armed orchestration goal: {err}"
+                );
+                return;
+            }
+        };
+        *self.goal_runtime.auto_armed_orchestration_goal_id.lock().await = Some(goal_id);
+    }
+
+    /// Flags the current turn as having invoked a child re-engagement tool
+    /// (`spawn_agent`, `followup_task`, `send_message`). Read at turn-end to
+    /// prevent auto-completing the orchestration goal on a turn that may have
+    /// re-opened a child. No-op when there is no active turn for `turn_context`.
+    pub(crate) async fn mark_reengaged_child_this_turn(&self, turn_context: &TurnContext) {
+        if let Some(turn_state) = self
+            .input_queue
+            .turn_state_for_sub_id(&self.active_turn, &turn_context.sub_id)
+            .await
+        {
+            turn_state.lock().await.reengaged_child_this_turn = true;
+        }
     }
 
     pub(crate) async fn set_thread_goal(
@@ -1388,10 +1444,143 @@ impl Session {
         }
         let goal_id = goal.goal_id.clone();
         let goal = protocol_goal_from_state(goal);
+        // For the auto-armed Gemini orchestration goal, inject the
+        // orchestration continuation prompt (treat children's reports as
+        // authoritative; don't re-investigate/re-plan delegated work) instead
+        // of the solo-worker prompt. The marker is only ever set on a
+        // Gemini-native root auto-arm, so non-Gemini/user goals are byte-identical.
+        let is_auto_armed_orchestration_goal =
+            *self.goal_runtime.auto_armed_orchestration_goal_id.lock().await == Some(goal_id.clone());
+        let prompt = if is_auto_armed_orchestration_goal {
+            orchestration_continuation_prompt(&goal)
+        } else {
+            continuation_prompt(&goal)
+        };
         Some(GoalContinuationCandidate {
             goal_id,
-            items: vec![goal_context_input_item(continuation_prompt(&goal))],
+            items: vec![goal_context_input_item(prompt)],
         })
+    }
+
+    /// Structural termination for a Gemini-native root orchestrator: once the
+    /// auto-armed goal's delegated work is all terminal and a consolidated
+    /// answer has been emitted, complete the goal so the idle continuation
+    /// backstop stops re-engaging the (now-done) orchestrator. This replaces
+    /// the dependence on the model remembering to call `update_goal complete`.
+    ///
+    /// Called from `on_task_finished` immediately before `MaybeContinueIfIdle`,
+    /// on a turn that already cleared the active turn (i.e. the session is
+    /// idle). Completing here makes the very next continuation candidate
+    /// short-circuit on `status != Active`.
+    ///
+    /// Anti-stall (O15): every guard below is strictly more restrictive than
+    /// the existing continuation, and whenever any guard fails we leave the
+    /// goal `Active`, so the pre-existing backstop is untouched. We only
+    /// complete on a pure synthesis turn (final answer emitted, no child
+    /// re-engaged this turn, nothing pending in the trigger-turn mailbox, all
+    /// enumerable children conservatively terminal).
+    pub(crate) async fn maybe_auto_complete_gemini_orchestration_goal(
+        &self,
+        turn_context: &TurnContext,
+        emitted_final_answer: bool,
+        reengaged_child_this_turn: bool,
+    ) {
+        // Cheapest gates first — this runs on every idle turn-end for all
+        // sessions, so bail before any lock/db/enumeration work.
+        if !emitted_final_answer || reengaged_child_this_turn {
+            return;
+        }
+        if turn_context.provider.info().wire_api != WireApi::GeminiNative
+            || !is_root_orchestrator_source(&turn_context.session_source)
+        {
+            return;
+        }
+        let marker_goal_id = {
+            let marker = self.goal_runtime.auto_armed_orchestration_goal_id.lock().await;
+            match marker.as_ref() {
+                Some(goal_id) => goal_id.clone(),
+                None => return,
+            }
+        };
+        // An uncollected non-empty child completion would wake the parent via
+        // the trigger-turn mailbox; don't complete while one is pending.
+        if self.input_queue.has_trigger_turn_mailbox_items().await {
+            return;
+        }
+        // The goal must still be the exact auto-armed goal and still Active.
+        let goal = match self.state_db_for_thread_goals().await {
+            Ok(Some(state_db)) => match state_db.thread_goals().get_thread_goal(self.thread_id).await
+            {
+                Ok(goal) => goal,
+                Err(err) => {
+                    tracing::warn!(
+                        "skipping orchestration auto-complete: failed to read thread goal: {err}"
+                    );
+                    return;
+                }
+            },
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(
+                    "skipping orchestration auto-complete: failed to open state db: {err}"
+                );
+                return;
+            }
+        };
+        let Some(goal) = goal else {
+            return;
+        };
+        if goal.status != codex_state::ThreadGoalStatus::Active || goal.goal_id != marker_goal_id {
+            return;
+        }
+        // Every delegated child must be conservatively terminal. An empty list
+        // is vacuously terminal (e.g. all children explicitly closed). Any
+        // non-terminal child (NotFound/PendingInit/Running/Interrupted) keeps
+        // the goal Active so the existing continuation re-wakes the parent.
+        let children = match self
+            .services
+            .agent_control
+            .open_thread_spawn_children(self.thread_id)
+            .await
+        {
+            Ok(children) => children,
+            Err(err) => {
+                tracing::warn!(
+                    "skipping orchestration auto-complete: failed to enumerate children: {err}"
+                );
+                return;
+            }
+        };
+        for (child_thread_id, _metadata) in &children {
+            let status: AgentStatus = self.services.agent_control.get_status(*child_thread_id).await;
+            if !is_conservatively_terminal(&status) {
+                return;
+            }
+        }
+
+        // Genuinely done: complete the goal exactly as the model's
+        // `update_goal complete` would. `set_thread_goal` performs final
+        // wall-clock accounting, flips Active->Complete, and emits
+        // GOAL_COMPLETED. (No `ToolCompletedGoal` event: the prior
+        // `TurnFinished` already cleared the per-turn accounting snapshot, so
+        // it would be a no-op here.)
+        if let Err(err) = self
+            .set_thread_goal(
+                turn_context,
+                SetGoalRequest {
+                    objective: None,
+                    status: Some(ThreadGoalStatus::Complete),
+                    token_budget: None,
+                },
+            )
+            .await
+        {
+            tracing::warn!("failed to auto-complete Gemini orchestration goal: {err}");
+        } else {
+            tracing::debug!(
+                "auto-completed Gemini orchestration goal {marker_goal_id} on clean synthesis turn"
+            );
+        }
     }
 }
 

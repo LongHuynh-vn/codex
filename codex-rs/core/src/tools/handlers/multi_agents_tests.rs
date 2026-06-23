@@ -189,7 +189,7 @@ enum AutoGoalProvider {
 }
 
 struct AutoGoalSpawnSetup {
-    _manager: ThreadManager,
+    manager: ThreadManager,
     session: Arc<crate::session::session::Session>,
     turn: Arc<TurnContext>,
     state_db: StateDbHandle,
@@ -250,7 +250,7 @@ where
         .session_source = session_source(root.thread_id);
 
     AutoGoalSpawnSetup {
-        _manager: manager,
+        manager,
         session,
         turn,
         state_db,
@@ -908,6 +908,266 @@ async fn multi_agent_v2_spawn_gemini_auto_goal_complete_stops_idle_continuation(
         .await
         .expect("idle goal runtime should apply");
     assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+// --- Gemini orchestration structural auto-completion (Layer 1) -------------
+
+/// Arms an Active orchestration goal on the setup's session, optionally marking
+/// it as auto-armed (the marker the real Gemini auto-arm records). Mirrors the
+/// auto-arm so child status can be driven deterministically.
+async fn arm_orchestration_goal(setup: &AutoGoalSpawnSetup, mark_auto_armed: bool) {
+    setup
+        .session
+        .create_thread_goal(
+            setup.turn.as_ref(),
+            crate::goals::CreateGoalRequest {
+                objective: "Review all worker results".to_string(),
+                token_budget: Some(250_000),
+            },
+        )
+        .await
+        .expect("orchestration goal should arm");
+    if mark_auto_armed {
+        setup.session.mark_auto_armed_orchestration_goal().await;
+    }
+}
+
+async fn orchestration_goal_status(
+    setup: &AutoGoalSpawnSetup,
+) -> codex_protocol::protocol::ThreadGoalStatus {
+    setup
+        .session
+        .get_thread_goal()
+        .await
+        .expect("thread goal read should succeed")
+        .expect("goal should remain persisted")
+        .status
+}
+
+#[test]
+fn is_conservatively_terminal_matches_only_settled_states() {
+    use crate::agent::status::is_conservatively_terminal;
+    // Done: genuinely settled states.
+    assert!(is_conservatively_terminal(&AgentStatus::Completed(Some(
+        "report".to_string()
+    ))));
+    assert!(is_conservatively_terminal(&AgentStatus::Completed(None)));
+    assert!(is_conservatively_terminal(&AgentStatus::Errored(
+        "boom".to_string()
+    )));
+    assert!(is_conservatively_terminal(&AgentStatus::Shutdown));
+    // Not done: the conservative set (stricter than `is_final`, which counts
+    // NotFound terminal).
+    assert!(!is_conservatively_terminal(&AgentStatus::NotFound));
+    assert!(!is_conservatively_terminal(&AgentStatus::PendingInit));
+    assert!(!is_conservatively_terminal(&AgentStatus::Running));
+    assert!(!is_conservatively_terminal(&AgentStatus::Interrupted));
+}
+
+#[tokio::test]
+async fn gemini_auto_arm_records_orchestration_goal_marker() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    spawn_agent_v2_for_auto_goal(&setup, "worker").await;
+
+    let state_goal = setup
+        .state_db
+        .thread_goals()
+        .get_thread_goal(setup.session.thread_id)
+        .await
+        .expect("thread goal read should succeed")
+        .expect("Gemini root spawn should auto-arm a goal");
+    let marker = setup
+        .session
+        .goal_runtime
+        .auto_armed_orchestration_goal_id
+        .lock()
+        .await
+        .clone();
+    assert_eq!(marker, Some(state_goal.goal_id));
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_fires_on_clean_synthesis_turn() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Complete
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_skips_while_child_running() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    // Child queued but no turn driven: stays PendingInit (not conservatively
+    // terminal), so the goal must remain Active and the existing continuation
+    // backstop is preserved.
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+    assert!(
+        !crate::agent::status::is_conservatively_terminal(
+            &setup.session.services.agent_control.get_status(child_id).await
+        ),
+        "freshly-spawned worker should not be conservatively terminal"
+    );
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_skips_on_followup_turn() {
+    // Hole A: even with every child terminal, a turn that re-engaged a child
+    // (spawn_agent/followup_task/send_message) must not auto-complete.
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ true,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_skips_when_any_child_still_running() {
+    // Interim message while a sibling is still working: one child terminal, one
+    // not — any non-terminal child keeps the goal Active.
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (done_child, ..) = spawn_worker(&setup.session, &setup.turn, "done_worker").await;
+    let (_running_child, ..) = spawn_worker(&setup.session, &setup.turn, "running_worker").await;
+    complete_worker_turn(&setup.manager, done_child, "done result").await;
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_never_completes_user_created_goal() {
+    // A goal created without the auto-armed marker (e.g. user-created before the
+    // first spawn) must never be auto-completed, even on an otherwise-clean turn.
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ false).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_is_noop_on_non_gemini() {
+    // Non-Gemini providers must be byte-identical: the helper short-circuits on
+    // the wire-api gate even if a marked goal and terminal children exist.
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Bedrock,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
 }
 
 #[tokio::test]
