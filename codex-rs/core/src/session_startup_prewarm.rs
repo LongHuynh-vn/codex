@@ -254,6 +254,8 @@ async fn schedule_startup_prewarm_inner(
         BaseInstructions {
             text: base_instructions,
         },
+        // Startup prewarm is never a Gemini empty-report retry turn.
+        false,
     );
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_build_prompt",

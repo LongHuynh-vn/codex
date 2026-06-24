@@ -93,6 +93,7 @@ use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::GeminiSearchMode;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
@@ -120,6 +121,25 @@ use tracing::instrument;
 use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
+
+/// Maximum number of times a Gemini-native spawned sub-agent turn that ends with no report
+/// (no terminal assistant text, no O14 last-non-empty fallback, no O17 send_message-to-root
+/// fallback) is re-prompted for its final report before the turn is allowed to complete as
+/// `Completed(None)`. Bounded and `run_turn`-scoped so it cannot loop. See O24.
+///
+/// Raised from 1 to 2 (O27): the dominant residual null is a retry turn that re-hits the same
+/// degenerate empty `STOP` while Google Search grounding is still attached. Each retry turn is now
+/// grounding-free (see `build_prompt`), and a second bounded attempt covers the rare case where the
+/// first grounding-free retry is itself empty.
+const MAX_GEMINI_EMPTY_REPORT_RETRIES: u32 = 2;
+
+/// Re-prompt injected into a Gemini-native spawned sub-agent's history when it ends a turn with
+/// no report. Recorded as a `role:"user"` message so the child re-samples and produces its final
+/// assistant message on the retry. See O24. The retry turn is sampled grounding-free (O27), so the
+/// re-prompt also tells the child to stop researching and answer from what it already has. Keep the
+/// substring "without sending a final report" stable — the rollout null-probe and the
+/// `GEMINI_EMPTY_REPORT_REPROMPT_MARKER` tests match on it.
+const GEMINI_EMPTY_REPORT_REPROMPT: &str = "You ended your sub-agent turn without sending a final report, but your parent only receives your final assistant message. Respond now with ONLY your final report as a single plain-text assistant message summarizing what you found for your assigned task. Do not call any tools, do not use send_message, and do not continue researching — answer from what you already have. If you could not complete the task, say so briefly and include whatever partial findings you have.";
 
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
@@ -202,6 +222,9 @@ pub(crate) async fn run_turn(
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
     );
     let mut stop_hook_active = false;
+    // O24: counts empty-report re-prompts for this Gemini spawned-subagent turn. Resets per
+    // `run_turn` (i.e. per child turn), so it is model-undefeatable and the retry cannot loop.
+    let mut gemini_empty_report_retries: u32 = 0;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     #[allow(deprecated)]
@@ -262,6 +285,9 @@ pub(crate) async fn run_turn(
             &mut client_session,
             turn_metadata_header.as_deref(),
             sampling_request_input.clone(),
+            // O27: a grounding-attached retry tends to re-hit the empty `STOP`. Once we have
+            // re-prompted at least once for an empty report, sample the retry turn grounding-free.
+            gemini_empty_report_retries > 0,
             cancellation_token.child_token(),
         )
         .await
@@ -360,6 +386,39 @@ pub(crate) async fn run_turn(
                         last_non_empty_sampling_request_last_agent_message.clone(),
                         send_message_to_root_fallback,
                     );
+                    // O24: a Gemini-native spawned sub-agent can end a turn with a degenerate
+                    // empty `STOP` (no assistant text, no tool call) and thus no report. When no
+                    // report was recovered from terminal text, the O14 last-non-empty fallback, or
+                    // the O17 send_message-to-root fallback (all consulted just above), the parent
+                    // would see `Completed(None)` and re-engage, overshooting its budget. Re-prompt
+                    // the child for its report inside its own turn, bounded, before the completion
+                    // surfaces. Placed after the fallbacks (so a recovered report never triggers a
+                    // retry) and before the stop/legacy hooks (so a retried, non-final turn does not
+                    // fire them). Mirrors the stop-hook continuation precedent below. The next loop
+                    // iteration samples the retry turn grounding-free (O27: `gemini_empty_report_retries
+                    // > 0` is passed to `run_sampling_request`), since the empty `STOP` correlates with
+                    // grounding being attached.
+                    if wire_api == WireApi::GeminiNative
+                        && is_spawned_subagent
+                        && last_agent_message.is_none()
+                        && gemini_empty_report_retries < MAX_GEMINI_EMPTY_REPORT_RETRIES
+                    {
+                        let reprompt = ResponseItem::Message {
+                            id: None,
+                            role: "user".to_string(),
+                            content: vec![ContentItem::InputText {
+                                text: GEMINI_EMPTY_REPORT_REPROMPT.to_string(),
+                            }],
+                            phase: None,
+                        };
+                        sess.record_conversation_items(
+                            &turn_context,
+                            std::slice::from_ref(&reprompt),
+                        )
+                        .await;
+                        gemini_empty_report_retries += 1;
+                        continue;
+                    }
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
                         &turn_context,
@@ -992,11 +1051,30 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
     connector_ids
 }
 
+/// Resolves the per-request Gemini search mode. O27: a Gemini-native spawned sub-agent's
+/// empty-report retry turn is sampled grounding-free (`GeminiSearchMode::Off`), because the empty
+/// `STOP` that produces a null report correlates with Google Search grounding being attached.
+/// Otherwise the turn's configured mode is used unchanged. No-op for non-Gemini (the mode is only
+/// consumed when the request is built for `WireApi::GeminiNative`).
+fn prompt_gemini_search_mode(
+    turn_search_mode: GeminiSearchMode,
+    suppress_gemini_grounding: bool,
+) -> Option<GeminiSearchMode> {
+    if suppress_gemini_grounding {
+        Some(GeminiSearchMode::Off)
+    } else {
+        Some(turn_search_mode)
+    }
+}
+
 pub(crate) fn build_prompt(
     input: Vec<ResponseItem>,
     router: &ToolRouter,
     turn_context: &TurnContext,
     base_instructions: BaseInstructions,
+    // O27: when true (a Gemini-native spawned sub-agent's empty-report retry turn), sample
+    // grounding-free by forcing `GeminiSearchMode::Off`. No-op for non-Gemini.
+    suppress_gemini_grounding: bool,
 ) -> Prompt {
     Prompt {
         input,
@@ -1004,7 +1082,10 @@ pub(crate) fn build_prompt(
         parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,
         personality: turn_context.personality,
-        gemini_search_mode: Some(turn_context.gemini_search_mode),
+        gemini_search_mode: prompt_gemini_search_mode(
+            turn_context.gemini_search_mode,
+            suppress_gemini_grounding,
+        ),
         output_schema: turn_context.final_output_json_schema.clone(),
         output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
             &turn_context.session_source,
@@ -1030,6 +1111,7 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     turn_metadata_header: Option<&str>,
     input: Vec<ResponseItem>,
+    suppress_gemini_grounding: bool,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     let router = built_tools(sess.as_ref(), turn_context.as_ref(), &cancellation_token).await?;
@@ -1064,6 +1146,7 @@ async fn run_sampling_request(
             router.as_ref(),
             turn_context.as_ref(),
             base_instructions.clone(),
+            suppress_gemini_grounding,
         );
         let err = match try_run_sampling_request(
             tool_runtime.clone(),

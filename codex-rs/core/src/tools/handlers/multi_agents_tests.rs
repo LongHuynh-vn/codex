@@ -57,6 +57,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::CollabWaitingEndEvent;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileSystemAccessMode;
@@ -945,23 +946,25 @@ async fn orchestration_goal_status(
 }
 
 #[test]
-fn is_conservatively_terminal_matches_only_settled_states() {
-    use crate::agent::status::is_conservatively_terminal;
-    // Done: genuinely settled states.
-    assert!(is_conservatively_terminal(&AgentStatus::Completed(Some(
+fn is_terminal_with_delivery_excludes_null_completion() {
+    use crate::agent::status::is_terminal_with_delivery;
+    // Done with delivery: a report, or a determinate error/shutdown verdict.
+    assert!(is_terminal_with_delivery(&AgentStatus::Completed(Some(
         "report".to_string()
     ))));
-    assert!(is_conservatively_terminal(&AgentStatus::Completed(None)));
-    assert!(is_conservatively_terminal(&AgentStatus::Errored(
+    assert!(is_terminal_with_delivery(&AgentStatus::Errored(
         "boom".to_string()
     )));
-    assert!(is_conservatively_terminal(&AgentStatus::Shutdown));
-    // Not done: the conservative set (stricter than `is_final`, which counts
-    // NotFound terminal).
-    assert!(!is_conservatively_terminal(&AgentStatus::NotFound));
-    assert!(!is_conservatively_terminal(&AgentStatus::PendingInit));
-    assert!(!is_conservatively_terminal(&AgentStatus::Running));
-    assert!(!is_conservatively_terminal(&AgentStatus::Interrupted));
+    assert!(is_terminal_with_delivery(&AgentStatus::Shutdown));
+    // NOT done: `Completed(None)` (null/no report) is indeterminate and
+    // recoverable, so it must be chased, not treated as delivered. (O27: this is
+    // exactly `is_conservatively_terminal` minus `Completed(None)`.)
+    assert!(!is_terminal_with_delivery(&AgentStatus::Completed(None)));
+    // NOT done: the non-terminal states, including a mid-retry child (Running).
+    assert!(!is_terminal_with_delivery(&AgentStatus::NotFound));
+    assert!(!is_terminal_with_delivery(&AgentStatus::PendingInit));
+    assert!(!is_terminal_with_delivery(&AgentStatus::Running));
+    assert!(!is_terminal_with_delivery(&AgentStatus::Interrupted));
 }
 
 #[tokio::test]
@@ -1027,15 +1030,20 @@ async fn orchestration_auto_complete_skips_while_child_running() {
     )
     .await;
     arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
-    // Child queued but no turn driven: stays PendingInit (not conservatively
-    // terminal), so the goal must remain Active and the existing continuation
+    // Child queued but no turn driven: stays PendingInit (not terminal-with-
+    // delivery), so the goal must remain Active and the existing continuation
     // backstop is preserved.
     let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
     assert!(
-        !crate::agent::status::is_conservatively_terminal(
-            &setup.session.services.agent_control.get_status(child_id).await
+        !crate::agent::status::is_terminal_with_delivery(
+            &setup
+                .session
+                .services
+                .agent_control
+                .get_status(child_id)
+                .await
         ),
-        "freshly-spawned worker should not be conservatively terminal"
+        "freshly-spawned worker should not be terminal-with-delivery"
     );
 
     setup
@@ -1160,6 +1168,165 @@ async fn orchestration_auto_complete_is_noop_on_non_gemini() {
         .maybe_auto_complete_gemini_orchestration_goal(
             setup.turn.as_ref(),
             /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_fires_across_turns_via_durable_answer() {
+    // O27 core fix: the parent emits its consolidated answer on the synthesis turn
+    // while a child is still running (so that turn cannot complete), then a later
+    // text-free idle continuation turn — with the child now terminal — completes
+    // via the durable "answer emitted" marker. Under O26 (which required the
+    // answer on the SAME idle turn) this stayed Active and ground the budget.
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+
+    // Synthesis turn: answer emitted, but the child is still PendingInit, so the
+    // turn cannot complete — it only records the durable answer marker.
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
+
+    // Child reports; a later text-free continuation turn (no fresh answer)
+    // completes via the durable marker.
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ false,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Complete
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_chases_null_child() {
+    // O27: a child that finished with no report (`Completed(None)`) is NOT
+    // terminal-with-delivery. Even with an answer emitted and no re-engagement,
+    // the goal stays Active so the parent chases a real report instead of
+    // finalizing with a missing section. (Under O26's `is_conservatively_terminal`
+    // this would have wrongly completed.)
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+    complete_worker_turn_without_report(&setup.manager, child_id).await;
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_completes_with_errored_child() {
+    // O27: an errored child is a determinate terminal verdict (delivered), so a
+    // clean synthesis turn completes — the orchestrator surfaces the error in its
+    // answer rather than spinning on re-engagement.
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+    error_worker_turn(&setup.manager, child_id, "worker boom").await;
+
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert_eq!(
+        orchestration_goal_status(&setup).await,
+        codex_protocol::protocol::ThreadGoalStatus::Complete
+    );
+}
+
+#[tokio::test]
+async fn orchestration_auto_complete_reengagement_clears_durable_answer() {
+    // O27 hole A (durable): a synthesis turn records the answer marker, but a
+    // subsequent re-engagement (spawn/followup/send) clears it, so a later clean
+    // idle turn must NOT complete until a *fresh* answer is emitted — a re-opened
+    // child cannot be finalized on a stale answer.
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    arm_orchestration_goal(&setup, /*mark_auto_armed*/ true).await;
+    let (child_id, ..) = spawn_worker(&setup.session, &setup.turn, "worker").await;
+
+    // Synthesis turn while the child is still running: records the durable marker.
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    // A re-engagement clears the durable marker (single chokepoint).
+    setup
+        .session
+        .mark_reengaged_child_this_turn(setup.turn.as_ref())
+        .await;
+
+    // Child now reports; a clean idle turn with no fresh answer must NOT complete
+    // because the durable marker was cleared by the re-engagement.
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    setup
+        .session
+        .maybe_auto_complete_gemini_orchestration_goal(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ false,
             /*reengaged_child_this_turn*/ false,
         )
         .await;
@@ -5223,6 +5390,26 @@ async fn complete_worker_turn(manager: &ThreadManager, agent_id: ThreadId, messa
 
 async fn complete_worker_turn_without_report(manager: &ThreadManager, agent_id: ThreadId) {
     complete_worker_turn_with_report(manager, agent_id, WorkerTurnReport::Missing).await;
+}
+
+/// Drives a worker to a terminal `Errored` status (a determinate failure verdict),
+/// used to pin O27's "an errored child is delivered, not chased" rule.
+async fn error_worker_turn(manager: &ThreadManager, agent_id: ThreadId, message: &str) {
+    let child_thread = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker thread should exist");
+    child_thread
+        .codex
+        .session
+        .send_event_raw(Event {
+            id: "worker-error".to_string(),
+            msg: EventMsg::Error(ErrorEvent {
+                message: message.to_string(),
+                codex_error_info: None,
+            }),
+        })
+        .await;
 }
 
 enum WorkerTurnReport<'a> {

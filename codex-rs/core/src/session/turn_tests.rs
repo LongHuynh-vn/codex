@@ -50,6 +50,38 @@ fn effective_turn_last_agent_message_uses_fallback_for_gemini_spawned_subagent()
 }
 
 #[test]
+fn empty_report_retry_turn_is_sampled_grounding_free() {
+    // O27: a Gemini-native spawned sub-agent's empty-report retry turn (`suppress = true`) must be
+    // sampled grounding-free regardless of the turn's configured search mode, so the retry does not
+    // re-hit the grounding-correlated empty `STOP`.
+    for mode in [
+        GeminiSearchMode::Grounding,
+        GeminiSearchMode::Hybrid,
+        GeminiSearchMode::Tavily,
+        GeminiSearchMode::Off,
+    ] {
+        assert_eq!(
+            prompt_gemini_search_mode(mode, /*suppress_gemini_grounding*/ true),
+            Some(GeminiSearchMode::Off),
+            "suppressed retry must force grounding-free for {mode:?}"
+        );
+    }
+    // A non-retry turn (`suppress = false`) keeps its configured mode unchanged.
+    for mode in [
+        GeminiSearchMode::Grounding,
+        GeminiSearchMode::Hybrid,
+        GeminiSearchMode::Tavily,
+        GeminiSearchMode::Off,
+    ] {
+        assert_eq!(
+            prompt_gemini_search_mode(mode, /*suppress_gemini_grounding*/ false),
+            Some(mode),
+            "non-retry turn must keep its configured mode {mode:?}"
+        );
+    }
+}
+
+#[test]
 fn effective_turn_last_agent_message_keeps_gemini_root_terminal_value() {
     assert_eq!(
         effective_turn_last_agent_message(

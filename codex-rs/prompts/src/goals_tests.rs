@@ -55,6 +55,12 @@ fn orchestration_continuation_prompt_inverts_solo_redo_pressure() {
     assert!(prompt.contains("authoritative for the part you delegated"));
     assert!(prompt.contains("Do NOT re-investigate"));
 
+    // O27: chase a child that delivered no usable report before finalizing, and
+    // surface an errored/failed child by name rather than dropping its section.
+    assert!(prompt.contains("re-engage that specific child with `followup_task`"));
+    assert!(prompt.contains("naming the sub-agent"));
+    assert!(prompt.contains("Never omit a failed section silently."));
+
     // It must NOT carry the solo-worker prompt's redo/re-verify pressure that is
     // the confirmed root cause of over-management.
     let solo = continuation_prompt(&goal);
