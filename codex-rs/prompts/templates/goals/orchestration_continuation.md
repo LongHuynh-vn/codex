@@ -13,6 +13,10 @@ Orchestration behavior:
 - Do NOT re-plan delegated work or open new investigations into areas a child already covered. Use `wait_agent`/`list_agents` to collect any newly-reported child results, then integrate them.
 - Only start genuinely new work if a concrete part of the objective has not been delegated and cannot be answered from the children's reports.
 
+Handling children that did not deliver a usable report:
+- If a delegated child finished but delivered no usable report (it returned nothing/empty), re-engage that specific child with `followup_task` to obtain its report before you finalize — do not silently drop its part of the objective.
+- If a delegated child errored or genuinely could not complete its part, do NOT keep retrying it indefinitely; instead, surface that result in your consolidated answer by naming the sub-agent (its task) and stating its error or the reason it could not finish. Never omit a failed section silently.
+
 Budget:
 - Tokens used: {{ tokens_used }}
 - Token budget: {{ token_budget }}
