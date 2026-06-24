@@ -26,6 +26,7 @@ use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_tool_search_call;
@@ -89,6 +90,25 @@ const GEMINI_SECOND_RETRY_REPORT: &str = "recovered report after the second empt
 /// A request body containing it proves the bounded retry fired and re-sampled the child.
 const GEMINI_EMPTY_REPORT_REPROMPT_MARKER: &str =
     "ended your sub-agent turn without sending a final report";
+// O27 Lever 1 fixtures: on Gemini, an oversized child report is condensed once at forward time.
+/// Distinctive fragment of the summarizer instruction. A request body containing it proves the
+/// forward-time summarize call fired; its absence proves no summarize call was issued.
+const SUMMARIZE_INSTRUCTION_MARKER: &str = "Condense the following sub-agent report";
+/// Embedded once in the oversized report so we can assert the verbatim report is/ isn't forwarded.
+const LARGE_REPORT_VERBATIM_SENTINEL: &str = "LARGE_REPORT_VERBATIM_SENTINEL";
+/// Embedded in the mocked summary so we can assert the condensed body replaced the report.
+const CONDENSED_SUMMARY_SENTINEL: &str = "CONDENSED_SUMMARY_SENTINEL";
+const GEMINI_LARGE_PARENT_PROMPT: &str = "spawn a worker that returns an oversized report";
+const GEMINI_LARGE_CHILD_PROMPT: &str = "child: produce a very long report";
+const GEMINI_SMALL_PARENT_PROMPT: &str = "spawn a worker that returns a short report";
+const GEMINI_SMALL_CHILD_PROMPT: &str = "child: produce a short report";
+const GEMINI_SMALL_REPORT: &str = "a small child report well under the condense threshold";
+const GEMINI_FALLBACK_PARENT_PROMPT: &str =
+    "spawn a worker whose oversized report fails to condense";
+const GEMINI_FALLBACK_CHILD_PROMPT: &str = "child: produce a long report the summarizer drops";
+const GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT: &str =
+    "spawn a worker that stays empty so nothing is summarized";
+const GEMINI_EMPTY_NOSUMMARIZE_CHILD_PROMPT: &str = "child: stay empty through both retries";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     let is_zstd = req
@@ -138,6 +158,42 @@ fn has_subagent_notification(req: &ResponsesRequest) -> bool {
     req.message_input_texts("user")
         .iter()
         .any(|text| text.contains("<subagent_notification>"))
+}
+
+/// Builds a report comfortably above `GEMINI_CHILD_REPORT_SUMMARY_THRESHOLD_BYTES` (4000) so the
+/// forward path condenses it, with `sentinel` embedded so a test can assert the verbatim report is
+/// (or is not) forwarded.
+fn oversized_report(sentinel: &str) -> String {
+    format!(
+        "{sentinel} {}",
+        "lorem ipsum dolor sit amet consectetur ".repeat(150)
+    )
+}
+
+/// True if any request the mock server received carried `marker` in its (possibly compressed) body.
+async fn server_saw_marker(server: &MockServer, marker: &str) -> bool {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|req| body_contains(req, marker))
+}
+
+/// Flattens captured Gemini request bodies into their `contents[].parts[].text` spans.
+fn gemini_content_texts(captured: &[Value]) -> Vec<String> {
+    captured
+        .iter()
+        .flat_map(|req| {
+            req["contents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|content| content["parts"].as_array().into_iter().flatten())
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 fn tool_parameter_description(tool: &Value, parameter_name: &str) -> Option<String> {
@@ -1503,6 +1559,593 @@ async fn responses_spawned_child_empty_turn_is_not_retried() -> Result<()> {
             .iter()
             .all(|req| !req.body_contains_text(GEMINI_EMPTY_REPORT_REPROMPT_MARKER)),
         "the Gemini empty-report retry must never re-prompt a Responses spawned child"
+    );
+
+    Ok(())
+}
+
+// O27 Lever 1 (a): a Gemini spawned child's OVERSIZED report is condensed once at forward time, so
+// the parent's notification carries the bounded summary rather than the verbatim report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_large_child_report_is_forwarded_as_summary() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    }))
+    .await?;
+    let server = harness.server();
+    let large_report = oversized_report(LARGE_REPORT_VERBATIM_SENTINEL);
+
+    let _parent_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_LARGE_PARENT_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "spawn_agent",
+            json!({
+                "message": GEMINI_LARGE_CHILD_PROMPT,
+                "task_name": "large_report_worker",
+            }),
+            Some("sig-spawn-large-report"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _parent_after_spawn = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_LARGE_PARENT_PROMPT)
+                && body_contains(req, r#""functionResponse""#)
+                && body_contains(req, r#""name":"spawn_agent""#)
+                && !body_contains(req, "<subagent_notification>")
+        },
+        gemini_text_sse("parent waiting for child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+    // Delay the child so the parent finishes its post-spawn turn and is idle when the (condensed)
+    // notification wakes it — keeps the wake/synthesis ordering deterministic.
+    let _child_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_LARGE_CHILD_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_text_sse(&large_report),
+        Some(Duration::from_secs(1)),
+    )
+    .await;
+    // The forward-time summarize call carries the instruction + full report; condense it.
+    let summarize = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, SUMMARIZE_INSTRUCTION_MARKER),
+        gemini_text_sse(&format!("{CONDENSED_SUMMARY_SENTINEL} condensed worker report")),
+        /*response_delay*/ None,
+    )
+    .await;
+    let synthesis = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, "<subagent_notification>"),
+        gemini_text_sse("synthesized condensed child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn(GEMINI_LARGE_PARENT_PROMPT)
+        .await?;
+    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
+    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
+    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
+    // The child's OWN status keeps the full report; only the forwarded copy is condensed.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = child_thread.agent_status().await;
+        if matches!(status, AgentStatus::Completed(_)) {
+            assert_eq!(status, AgentStatus::Completed(Some(large_report.clone())));
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let captured = loop {
+        let captured = synthesis.requests();
+        if !captured.is_empty() {
+            break captured;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent synthesis request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+
+    // The summarize call fired exactly once and received the full report to condense.
+    let summarize_reqs = summarize.requests();
+    assert_eq!(summarize_reqs.len(), 1, "exactly one summarize call expected");
+    assert!(
+        gemini_content_texts(&summarize_reqs)
+            .iter()
+            .any(|t| t.contains(LARGE_REPORT_VERBATIM_SENTINEL)),
+        "summarize request must carry the full report to condense"
+    );
+
+    // The parent synthesis sees the CONDENSED body, never the verbatim report.
+    let synthesis_texts = gemini_content_texts(&captured);
+    assert!(
+        synthesis_texts.iter().any(|t| t.contains("<subagent_notification>")
+            && t.contains(CONDENSED_SUMMARY_SENTINEL)),
+        "parent notification must carry the condensed summary: {synthesis_texts:?}"
+    );
+    assert!(
+        synthesis_texts
+            .iter()
+            .all(|t| !t.contains(LARGE_REPORT_VERBATIM_SENTINEL)),
+        "verbatim oversized report must NOT reach the parent: {synthesis_texts:?}"
+    );
+
+    Ok(())
+}
+
+// O27 Lever 1 (b): a Gemini child report UNDER the threshold is forwarded verbatim, with no
+// forward-time summarize call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_small_child_report_is_forwarded_verbatim() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    }))
+    .await?;
+    let server = harness.server();
+
+    let _parent_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_SMALL_PARENT_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "spawn_agent",
+            json!({
+                "message": GEMINI_SMALL_CHILD_PROMPT,
+                "task_name": "small_report_worker",
+            }),
+            Some("sig-spawn-small-report"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _parent_after_spawn = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_SMALL_PARENT_PROMPT)
+                && body_contains(req, r#""functionResponse""#)
+                && body_contains(req, r#""name":"spawn_agent""#)
+                && !body_contains(req, "<subagent_notification>")
+        },
+        gemini_text_sse("parent waiting for child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _child_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_SMALL_CHILD_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_text_sse(GEMINI_SMALL_REPORT),
+        Some(Duration::from_secs(1)),
+    )
+    .await;
+    let synthesis = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, "<subagent_notification>"),
+        gemini_text_sse("synthesized small child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn(GEMINI_SMALL_PARENT_PROMPT)
+        .await?;
+    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
+    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
+    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = child_thread.agent_status().await;
+        if matches!(status, AgentStatus::Completed(_)) {
+            assert_eq!(
+                status,
+                AgentStatus::Completed(Some(GEMINI_SMALL_REPORT.to_string()))
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let captured = loop {
+        let captured = synthesis.requests();
+        if !captured.is_empty() {
+            break captured;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent synthesis request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+
+    let synthesis_texts = gemini_content_texts(&captured);
+    assert!(
+        synthesis_texts.iter().any(|t| t.contains("<subagent_notification>")
+            && t.contains(GEMINI_SMALL_REPORT)),
+        "a small report must be forwarded verbatim: {synthesis_texts:?}"
+    );
+    assert!(
+        !server_saw_marker(server, SUMMARIZE_INSTRUCTION_MARKER).await,
+        "a sub-threshold report must NOT trigger a summarize call"
+    );
+
+    Ok(())
+}
+
+// O27 Lever 1 (c): on the non-Gemini (Responses) wire api the forward path is byte-identical — even
+// an oversized report is forwarded verbatim and no summarize call is ever issued (the step is gated
+// on `WireApi::GeminiNative`). Exercises the same `forward_child_completion_to_parent` seam under V2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_child_report_is_forwarded_verbatim_without_summarize() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let large_report = oversized_report(LARGE_REPORT_VERBATIM_SENTINEL);
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+        "task_name": "responses_large_worker",
+    }))?;
+
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-turn1-1"),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
+            ev_completed("resp-turn1-1"),
+        ]),
+    )
+    .await;
+    let _child = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_assistant_message("msg-child-1", &large_report),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
+    // Delay the parent's post-spawn response so its turn 1 stays open while the (fast, undelayed)
+    // child completes and enqueues its mailbox notification. `submit_turn` blocks until turn 1
+    // completes (test harness waits for `TurnComplete`), so by the time we drive turn 2 the
+    // notification is already queued — the delivery is deterministic, not a race.
+    let _turn1_followup = mount_response_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        sse_response(sse(vec![
+            ev_response_created("resp-turn1-2"),
+            ev_assistant_message("msg-turn1-2", "parent done"),
+            ev_completed("resp-turn1-2"),
+        ]))
+        .set_delay(Duration::from_secs(1)),
+    )
+    .await;
+    let _turn2 = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, TURN_2_NO_WAIT_PROMPT)
+                && !body_contains(req, "<subagent_notification>")
+        },
+        sse(vec![
+            ev_response_created("resp-turn2-1"),
+            ev_assistant_message("msg-turn2-1", "no wait path"),
+            ev_completed("resp-turn2-1"),
+        ]),
+    )
+    .await;
+    // The forwarded notification is drained into a follow-up request; serve it so the parent
+    // settles cleanly instead of 404-looping while we observe the forwarded report.
+    let _turn2_after_notif = mount_response_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, "<subagent_notification>"),
+        sse_response(sse(vec![
+            ev_response_created("resp-ack-1"),
+            ev_assistant_message("msg-ack-1", "acknowledged child report"),
+            ev_completed("resp-ack-1"),
+        ])),
+    )
+    .await;
+
+    #[allow(clippy::expect_used)]
+    let test = test_codex()
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.model = Some(INHERITED_MODEL.to_string());
+            config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
+        })
+        .build(&server)
+        .await?;
+    // Blocks until parent turn 1 completes; the child finishes and queues during the delay above.
+    test.submit_turn(TURN_1_PROMPT).await?;
+    let spawned_id = wait_for_spawned_thread_id(&test).await?;
+    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
+    let child_thread = test.thread_manager.get_thread(spawned_id).await?;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = child_thread.agent_status().await;
+        if matches!(status, AgentStatus::Completed(_)) {
+            assert_eq!(status, AgentStatus::Completed(Some(large_report.clone())));
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    // `submit_turn` blocks until turn 2 (including its notification-bearing follow-up) completes.
+    test.submit_turn(TURN_2_NO_WAIT_PROMPT).await?;
+    let received = server.received_requests().await.unwrap_or_default();
+    assert!(
+        received
+            .iter()
+            .any(|req| body_contains(req, LARGE_REPORT_VERBATIM_SENTINEL)),
+        "the Responses path must forward the full report verbatim into the parent's context"
+    );
+    assert!(
+        received
+            .iter()
+            .all(|req| !body_contains(req, SUMMARIZE_INSTRUCTION_MARKER)),
+        "the Responses path must never issue a summarize request (gate is GeminiNative-only)"
+    );
+
+    Ok(())
+}
+
+// O27 Lever 1 (d): if the forward-time summarizer fails (here: empty output), the FULL report is
+// forwarded unchanged — a summarize step must never drop a child's section.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_child_report_summarizer_failure_falls_back_to_full_report() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    }))
+    .await?;
+    let server = harness.server();
+    let large_report = oversized_report(LARGE_REPORT_VERBATIM_SENTINEL);
+
+    let _parent_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_FALLBACK_PARENT_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "spawn_agent",
+            json!({
+                "message": GEMINI_FALLBACK_CHILD_PROMPT,
+                "task_name": "fallback_worker",
+            }),
+            Some("sig-spawn-fallback"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _parent_after_spawn = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_FALLBACK_PARENT_PROMPT)
+                && body_contains(req, r#""functionResponse""#)
+                && body_contains(req, r#""name":"spawn_agent""#)
+                && !body_contains(req, "<subagent_notification>")
+        },
+        gemini_text_sse("parent waiting for child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _child_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_FALLBACK_CHILD_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_text_sse(&large_report),
+        Some(Duration::from_secs(1)),
+    )
+    .await;
+    // Summarizer returns an empty completion → `summarize_child_report` yields `None` → fall back.
+    let summarize = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, SUMMARIZE_INSTRUCTION_MARKER),
+        gemini_empty_sse(),
+        /*response_delay*/ None,
+    )
+    .await;
+    let synthesis = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, "<subagent_notification>"),
+        gemini_text_sse("synthesized fallback child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn(GEMINI_FALLBACK_PARENT_PROMPT)
+        .await?;
+    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
+    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
+    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = child_thread.agent_status().await;
+        if matches!(status, AgentStatus::Completed(_)) {
+            assert_eq!(status, AgentStatus::Completed(Some(large_report.clone())));
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let captured = loop {
+        let captured = synthesis.requests();
+        if !captured.is_empty() {
+            break captured;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent synthesis request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+
+    // The summarize was attempted, but on failure the parent receives the FULL report verbatim.
+    assert_eq!(summarize.requests().len(), 1, "summarize should be attempted");
+    let synthesis_texts = gemini_content_texts(&captured);
+    assert!(
+        synthesis_texts.iter().any(|t| t.contains("<subagent_notification>")
+            && t.contains(LARGE_REPORT_VERBATIM_SENTINEL)),
+        "summarizer failure must fall back to the full report: {synthesis_texts:?}"
+    );
+
+    Ok(())
+}
+
+// O27 Lever 1 (e): a Gemini child that completes empty (`Completed(None)`) still hits the O25d
+// early-return BEFORE the new summarize step — no summarize call and no parent notification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_empty_completion_skips_summarize_and_notification() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    }))
+    .await?;
+    let server = harness.server();
+
+    let _parent_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "spawn_agent",
+            json!({
+                "message": GEMINI_EMPTY_NOSUMMARIZE_CHILD_PROMPT,
+                "task_name": "empty_nosummarize_worker",
+            }),
+            Some("sig-spawn-empty-nosummarize"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _parent_after_spawn = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT)
+                && body_contains(req, r#""functionResponse""#)
+                && body_contains(req, r#""name":"spawn_agent""#)
+                && !body_contains(req, "<subagent_notification>")
+        },
+        gemini_text_sse("parent waiting for child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+    // Child is empty on its first turn and on both bounded retries → `Completed(None)`.
+    let _child_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_EMPTY_NOSUMMARIZE_CHILD_PROMPT)
+                && body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 0
+        },
+        gemini_empty_sse(),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _child_retry_1 = mount_gemini_sse_once_match(
+        server,
+        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 1,
+        gemini_empty_sse(),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _child_retry_2 = mount_gemini_sse_once_match(
+        server,
+        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 2,
+        gemini_empty_sse(),
+        /*response_delay*/ None,
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn(GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT)
+        .await?;
+    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
+    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
+    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = child_thread.agent_status().await;
+        if matches!(status, AgentStatus::Completed(_)) {
+            assert_eq!(status, AgentStatus::Completed(None));
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        !server_saw_marker(server, SUMMARIZE_INSTRUCTION_MARKER).await,
+        "an empty completion must not reach the summarize step (O25d returns first)"
+    );
+    assert!(
+        !server_saw_marker(server, "<subagent_notification>").await,
+        "an empty completion must not produce a parent notification (O25d untouched)"
     );
 
     Ok(())

@@ -130,6 +130,7 @@ use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
 use codex_rollout::state_db;
 use codex_rollout_trace::AgentResultTracePayload;
+use codex_rollout_trace::InferenceTraceContext;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
 use codex_rollout_trace::ThreadTraceContext;
 use codex_sandboxing::policy_transforms::intersect_permission_profiles;
@@ -174,6 +175,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::client::ModelClient;
+use crate::client_common::ResponseEvent;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact::collect_user_messages;
 use crate::config::Config;
@@ -186,6 +188,8 @@ use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
 use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
+use crate::Prompt;
+use crate::session::turn::get_last_assistant_message_from_turn;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStackOrdering;
@@ -363,6 +367,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -1795,6 +1800,17 @@ impl Session {
             return;
         };
 
+        // O27 Lever 1: on Gemini, condense an oversized child report ONCE here so it does not
+        // re-inflate the parent's per-turn context on every subsequent parent turn. Any
+        // summarizer failure falls back to the full report; other wire APIs and small reports
+        // are untouched (the Responses path stays byte-identical).
+        let status = if turn_context.provider.info().wire_api == WireApi::GeminiNative {
+            self.maybe_summarize_child_status(turn_context, child_agent_path, status)
+                .await
+        } else {
+            status
+        };
+
         let message = format_subagent_notification_message(child_agent_path.as_str(), &status);
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
@@ -1838,6 +1854,122 @@ impl Session {
                     },
                 );
         }
+    }
+
+    /// O27 Lever 1: replace an oversized Gemini child completion report with a bounded summary
+    /// before it is forwarded to (and re-sent by) the parent. Small reports, non-`Completed`
+    /// statuses, and any summarizer failure fall through with the status unchanged so a child's
+    /// section is never dropped. Callers gate this on `WireApi::GeminiNative`.
+    async fn maybe_summarize_child_status(
+        &self,
+        turn_context: &TurnContext,
+        child_agent_path: &codex_protocol::AgentPath,
+        status: AgentStatus,
+    ) -> AgentStatus {
+        // Observed large child reports run 10–27K chars; this floor sits well below the
+        // offenders yet above short `send_message`-style completions, so a summarize round-trip
+        // only fires when re-sending the full report each turn would actually hurt the budget.
+        const GEMINI_CHILD_REPORT_SUMMARY_THRESHOLD_BYTES: usize = 4000;
+
+        let report = match &status {
+            AgentStatus::Completed(Some(report))
+                if report.len() > GEMINI_CHILD_REPORT_SUMMARY_THRESHOLD_BYTES =>
+            {
+                report.clone()
+            }
+            _ => return status,
+        };
+
+        // Box the summarize future so its streaming/HTTP type graph stays behind a pointer
+        // instead of being monomorphized into the hot `send_event` future chain (which would
+        // overflow the compiler's auto-trait/type-layout recursion limit).
+        match self
+            .summarize_child_report(turn_context, &report)
+            .boxed()
+            .await
+        {
+            Some(summary) if !summary.is_empty() && summary.len() < report.len() => {
+                info!(
+                    child = child_agent_path.as_str(),
+                    chars_in = report.len(),
+                    chars_out = summary.len(),
+                    "gemini: condensed child report before forwarding to parent"
+                );
+                AgentStatus::Completed(Some(summary))
+            }
+            // Failure, empty, or a "summary" no smaller than the original: forward the full
+            // report unchanged rather than risk dropping or bloating the child's section.
+            _ => status,
+        }
+    }
+
+    /// Summarize `report` with the current turn model via an isolated, tool-free and
+    /// grounding-free streaming call. Mirrors the context-compaction stream mechanism but,
+    /// unlike `compact::drain_to_completed`, records nothing into session history — it only
+    /// extracts and returns the assistant text. Returns `None` on any stream error or empty
+    /// output so the caller can fall back to the full report.
+    async fn summarize_child_report(
+        &self,
+        turn_context: &TurnContext,
+        report: &str,
+    ) -> Option<String> {
+        // Kept as a distinct literal so the budget effect is greppable in logs/the binary.
+        const GEMINI_CHILD_REPORT_SUMMARY_INSTRUCTION: &str = "Condense the following sub-agent \
+report to at most ~200 words. Preserve concrete findings, decisions, file paths, commands, and the \
+final conclusion so the parent agent can act on it without the original. Output only the condensed \
+report, with no preamble.";
+
+        let prompt = Prompt {
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: format!("{GEMINI_CHILD_REPORT_SUMMARY_INSTRUCTION}\n\n{report}"),
+                }],
+                phase: None,
+            }],
+            personality: turn_context.personality,
+            ..Default::default()
+        };
+
+        let mut client_session = self.services.model_client.new_session();
+        let mut stream = match client_session
+            .stream(
+                &prompt,
+                &turn_context.model_info,
+                &turn_context.session_telemetry,
+                turn_context.reasoning_effort,
+                turn_context.reasoning_summary,
+                turn_context.config.service_tier.clone(),
+                None,
+                &InferenceTraceContext::disabled(),
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(err) => {
+                debug!("gemini child-report summarize stream failed to start: {err}");
+                return None;
+            }
+        };
+
+        let mut items: Vec<ResponseItem> = Vec::new();
+        loop {
+            match stream.next().await {
+                Some(Ok(ResponseEvent::OutputItemDone(item))) => items.push(item),
+                Some(Ok(ResponseEvent::Completed { .. })) => break,
+                Some(Ok(_)) => continue,
+                Some(Err(err)) => {
+                    debug!("gemini child-report summarize stream errored: {err}");
+                    return None;
+                }
+                None => {
+                    debug!("gemini child-report summarize stream closed before completion");
+                    return None;
+                }
+            }
+        }
+        get_last_assistant_message_from_turn(&items)
     }
 
     async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
