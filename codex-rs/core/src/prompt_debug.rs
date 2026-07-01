@@ -95,7 +95,7 @@ pub(crate) async fn build_prompt_input_from_session(
         router.as_ref(),
         turn_context.as_ref(),
         base_instructions,
-        // Prompt-debug rendering is never a Gemini empty-report retry turn.
+        // Prompt-debug rendering is never a Gemini complete_task grace turn.
         false,
     );
 

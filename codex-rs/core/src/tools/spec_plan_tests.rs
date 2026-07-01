@@ -11,6 +11,7 @@ use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::GEMINI_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ApplyPatchToolType;
@@ -987,6 +988,53 @@ async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
 }
 
 #[tokio::test]
+async fn complete_task_tool_is_registered_for_gemini_spawned_child_only() {
+    // O27 Lever 2: `complete_task` is registered only for a GeminiNative spawned child, so the
+    // Gemini root orchestrator and the OpenAI/Responses surface stay byte-identical.
+    fn thread_spawn_source() -> SessionSource {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        })
+    }
+
+    // Gemini spawned child: complete_task is present alongside the rest of the V2 surface.
+    let gemini_child = probe(|turn| {
+        use_gemini_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        turn.session_source = thread_spawn_source();
+    })
+    .await;
+    gemini_child.assert_visible_contains(&["complete_task", "wait_agent", "spawn_agent"]);
+    gemini_child.assert_registered_contains(&["complete_task"]);
+
+    // Gemini ROOT orchestrator: the rest of the V2 surface is present, but complete_task is not.
+    let gemini_root = probe(|turn| {
+        use_gemini_provider(turn);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        // Default test session_source is a root orchestrator (SessionSource::Exec).
+    })
+    .await;
+    gemini_root.assert_visible_contains(&["wait_agent", "spawn_agent"]);
+    gemini_root.assert_visible_lacks(&["complete_task"]);
+    gemini_root.assert_registered_lacks(&["complete_task"]);
+
+    // Responses (non-Gemini) spawned child: complete_task is absent — OpenAI surface byte-identical.
+    let responses_child = probe(|turn| {
+        use_bedrock_provider(turn); // Bedrock uses WireApi::Responses.
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        turn.session_source = thread_spawn_source();
+    })
+    .await;
+    responses_child.assert_visible_contains(&["wait_agent", "spawn_agent"]);
+    responses_child.assert_visible_lacks(&["complete_task"]);
+    responses_child.assert_registered_lacks(&["complete_task"]);
+}
+
+#[tokio::test]
 async fn multi_agent_feature_selects_one_agent_tool_family() {
     let v1 = probe(|turn| {
         set_feature(turn, Feature::Collab, /*enabled*/ true);
@@ -1068,8 +1116,7 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
     // Distinctive substrings of the Gemini-gated `GEMINI_MULTI_AGENT_V2_USAGE_HINT` hint.
     const NEW_GUIDANCE: &str = "spawn one bounded sub-agent per part";
     const WAIT_SENTENCE: &str = "keep calling `wait_agent`";
-    const FINAL_CHANNEL_SENTENCE: &str =
-        "deliver your complete result as your final-channel plain-text message";
+    const COMPLETE_TASK_SENTENCE: &str = "finalize by calling `complete_task`";
     const STOP_SENTENCE: &str = "integrate and STOP";
 
     let gemini = probe(|turn| {
@@ -1090,8 +1137,8 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
         "Gemini spawn_agent must include when-to-delegate guidance: {gemini_description:?}"
     );
     assert!(
-        gemini_description.contains(FINAL_CHANNEL_SENTENCE),
-        "Gemini spawn_agent must include final-channel delivery guidance: {gemini_description:?}"
+        gemini_description.contains(COMPLETE_TASK_SENTENCE),
+        "Gemini spawn_agent must include complete_task delivery guidance: {gemini_description:?}"
     );
     assert!(
         gemini_description.contains(STOP_SENTENCE),
@@ -1121,8 +1168,8 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
         "non-Gemini providers must not include the Gemini usage hint: {non_gemini_specs_json}"
     );
     assert!(
-        !non_gemini_specs_json.contains(FINAL_CHANNEL_SENTENCE),
-        "non-Gemini providers must not include Gemini final-channel guidance: {non_gemini_specs_json}"
+        !non_gemini_specs_json.contains(COMPLETE_TASK_SENTENCE),
+        "non-Gemini providers must not include Gemini complete_task guidance: {non_gemini_specs_json}"
     );
     assert!(
         !non_gemini_specs_json.contains(STOP_SENTENCE),

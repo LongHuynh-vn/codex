@@ -73,42 +73,25 @@ const GEMINI_SEND_MESSAGE_ONLY_PARENT_PROMPT: &str =
 const GEMINI_SEND_MESSAGE_ONLY_CHILD_PROMPT: &str =
     "send your complete report to /root with send_message and emit no final text";
 const GEMINI_SEND_MESSAGE_ONLY_REPORT: &str = "send-message-only child report";
-// O24 bounded empty-report retry fixtures.
-const GEMINI_EMPTY_RETRY_PARENT_PROMPT: &str = "spawn a child whose first turn is degenerate-empty";
-const GEMINI_EMPTY_RETRY_CHILD_PROMPT: &str = "child: deliver a report after an empty first turn";
-const GEMINI_EMPTY_RETRY_REPORT: &str = "recovered report after empty retry";
-const GEMINI_STILL_EMPTY_PARENT_PROMPT: &str = "spawn a child that stays empty after the retry";
-const GEMINI_STILL_EMPTY_CHILD_PROMPT: &str = "child: stays empty even after the retry";
+// O27 Lever 2 complete_task fixtures.
+const GEMINI_COMPLETE_TASK_PARENT_PROMPT: &str = "spawn a child that finalizes via complete_task";
+const GEMINI_COMPLETE_TASK_CHILD_PROMPT: &str = "child: finalize by calling complete_task";
+const GEMINI_COMPLETE_TASK_REPORT: &str = "the child complete_task report body";
+// O27 mandatory complete_task grace fixtures.
+const GEMINI_EMPTY_GRACE_PARENT_PROMPT: &str = "spawn a child whose first turn is degenerate-empty";
+const GEMINI_EMPTY_GRACE_CHILD_PROMPT: &str = "child: deliver a report after an empty first turn";
+const GEMINI_EMPTY_GRACE_REPORT: &str = "recovered report after complete_task grace";
+const GEMINI_STILL_EMPTY_PARENT_PROMPT: &str = "spawn a child that stays empty after grace";
+const GEMINI_STILL_EMPTY_CHILD_PROMPT: &str = "child: stays empty even after grace";
 const GEMINI_ROOT_EMPTY_PROMPT: &str = "root gemini turn that returns an empty completion";
-// O27 second-retry fixtures.
-const GEMINI_SECOND_RETRY_PARENT_PROMPT: &str =
-    "spawn a child that recovers only on the second bounded retry";
-const GEMINI_SECOND_RETRY_CHILD_PROMPT: &str =
-    "child: empty twice then deliver a report on the second retry";
-const GEMINI_SECOND_RETRY_REPORT: &str = "recovered report after the second empty retry";
-/// Distinctive verbatim fragment of the O24 empty-report re-prompt injected by `run_turn`.
-/// A request body containing it proves the bounded retry fired and re-sampled the child.
-const GEMINI_EMPTY_REPORT_REPROMPT_MARKER: &str =
-    "ended your sub-agent turn without sending a final report";
-// O27 Lever 1 fixtures: on Gemini, an oversized child report is condensed once at forward time.
-/// Distinctive fragment of the summarizer instruction. A request body containing it proves the
-/// forward-time summarize call fired; its absence proves no summarize call was issued.
-const SUMMARIZE_INSTRUCTION_MARKER: &str = "Condense the following sub-agent report";
+const GEMINI_MISSING_COMPLETE_TASK_FAILURE: &str =
+    "complete_task was not called before the sub-agent turn ended.";
+/// Distinctive verbatim fragment of the complete_task grace prompt injected by `run_turn`.
+/// A request body containing it proves the one-shot grace turn fired.
+const GEMINI_COMPLETE_TASK_GRACE_MARKER: &str = "You did not call complete_task";
+// O27 Lever 2 fixtures: complete_task bounds child results at source.
 /// Embedded once in the oversized report so we can assert the verbatim report is/ isn't forwarded.
 const LARGE_REPORT_VERBATIM_SENTINEL: &str = "LARGE_REPORT_VERBATIM_SENTINEL";
-/// Embedded in the mocked summary so we can assert the condensed body replaced the report.
-const CONDENSED_SUMMARY_SENTINEL: &str = "CONDENSED_SUMMARY_SENTINEL";
-const GEMINI_LARGE_PARENT_PROMPT: &str = "spawn a worker that returns an oversized report";
-const GEMINI_LARGE_CHILD_PROMPT: &str = "child: produce a very long report";
-const GEMINI_SMALL_PARENT_PROMPT: &str = "spawn a worker that returns a short report";
-const GEMINI_SMALL_CHILD_PROMPT: &str = "child: produce a short report";
-const GEMINI_SMALL_REPORT: &str = "a small child report well under the condense threshold";
-const GEMINI_FALLBACK_PARENT_PROMPT: &str =
-    "spawn a worker whose oversized report fails to condense";
-const GEMINI_FALLBACK_CHILD_PROMPT: &str = "child: produce a long report the summarizer drops";
-const GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT: &str =
-    "spawn a worker that stays empty so nothing is summarized";
-const GEMINI_EMPTY_NOSUMMARIZE_CHILD_PROMPT: &str = "child: stay empty through both retries";
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     let is_zstd = req
@@ -131,8 +114,8 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
 }
 
 /// Counts how many times `text` appears in the (possibly zstd-compressed) request body.
-/// O27: the empty-report re-prompt is recorded into the child's history each retry, so the
-/// Nth retry request carries the marker N times. Lets a matcher target a specific retry round.
+/// O27: the complete_task grace prompt is recorded into the child's history, so the grace request
+/// carries the marker once.
 fn body_marker_count(req: &wiremock::Request, text: &str) -> usize {
     let is_zstd = req
         .headers
@@ -160,40 +143,13 @@ fn has_subagent_notification(req: &ResponsesRequest) -> bool {
         .any(|text| text.contains("<subagent_notification>"))
 }
 
-/// Builds a report comfortably above `GEMINI_CHILD_REPORT_SUMMARY_THRESHOLD_BYTES` (4000) so the
-/// forward path condenses it, with `sentinel` embedded so a test can assert the verbatim report is
-/// (or is not) forwarded.
+/// Builds a large report with `sentinel` embedded so a test can assert the verbatim report is
+/// forwarded.
 fn oversized_report(sentinel: &str) -> String {
     format!(
         "{sentinel} {}",
         "lorem ipsum dolor sit amet consectetur ".repeat(150)
     )
-}
-
-/// True if any request the mock server received carried `marker` in its (possibly compressed) body.
-async fn server_saw_marker(server: &MockServer, marker: &str) -> bool {
-    server
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .iter()
-        .any(|req| body_contains(req, marker))
-}
-
-/// Flattens captured Gemini request bodies into their `contents[].parts[].text` spans.
-fn gemini_content_texts(captured: &[Value]) -> Vec<String> {
-    captured
-        .iter()
-        .flat_map(|req| {
-            req["contents"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|content| content["parts"].as_array().into_iter().flatten())
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .map(str::to_owned)
-        })
-        .collect()
 }
 
 fn tool_parameter_description(tool: &Value, parameter_name: &str) -> Option<String> {
@@ -985,7 +941,8 @@ async fn gemini_trigger_turn_subagent_notification_uses_clean_content() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_spawned_child_send_message_only_report_becomes_completion_body() -> Result<()> {
+async fn gemini_spawned_child_send_message_only_report_synthesizes_failed_completion_body()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
@@ -1053,6 +1010,13 @@ async fn gemini_spawned_child_send_message_only_report_becomes_completion_body()
         Some(Duration::from_secs(1)),
     )
     .await;
+    let _child_grace = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, GEMINI_COMPLETE_TASK_GRACE_MARKER),
+        gemini_empty_sse(),
+        /*response_delay*/ None,
+    )
+    .await;
     let synthesis = mount_gemini_sse_once_match(
         server,
         |req| body_contains(req, "<subagent_notification>"),
@@ -1068,13 +1032,15 @@ async fn gemini_spawned_child_send_message_only_report_becomes_completion_body()
     let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
     let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
     let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let status = child_thread.agent_status().await;
         if matches!(status, AgentStatus::Completed(_)) {
             assert_eq!(
                 status,
-                AgentStatus::Completed(Some(GEMINI_SEND_MESSAGE_ONLY_REPORT.to_string()))
+                AgentStatus::Completed(Some(format!(
+                    "Sub-agent task failed:\n{GEMINI_SEND_MESSAGE_ONLY_REPORT}"
+                )))
             );
             break;
         }
@@ -1084,7 +1050,7 @@ async fn gemini_spawned_child_send_message_only_report_becomes_completion_body()
         sleep(Duration::from_millis(10)).await;
     }
 
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let captured = loop {
         let captured = synthesis.requests();
         if !captured.is_empty() {
@@ -1109,7 +1075,7 @@ async fn gemini_spawned_child_send_message_only_report_becomes_completion_body()
         .collect::<Vec<_>>();
     let expected_notification = concat!(
         "<subagent_notification>\n",
-        r#"{"agent_path":"/root/send_message_only_worker","status":{"completed":"send-message-only child report"}}"#,
+        r#"{"agent_path":"/root/send_message_only_worker","status":{"completed":"Sub-agent task failed:\nsend-message-only child report"}}"#,
         "\n</subagent_notification>"
     );
     assert!(content_texts.contains(&expected_notification));
@@ -1122,11 +1088,10 @@ async fn gemini_spawned_child_send_message_only_report_becomes_completion_body()
     Ok(())
 }
 
-// O24: a Gemini-native spawned sub-agent whose turn ends with a degenerate empty `STOP`
-// (no assistant text, no tool call, no report) is re-prompted once inside its own `run_turn`;
-// on the retry it produces a real assistant message, so the parent sees a non-null completion.
+// O27 Lever 2 / 2b: a Gemini-native spawned sub-agent whose turn ends without `complete_task` gets
+// one grace turn; when the child calls `complete_task` there, that result becomes its completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_spawned_child_empty_turn_is_retried_into_a_report() -> Result<()> {
+async fn gemini_spawned_child_empty_turn_grace_complete_task_becomes_completion() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
@@ -1140,16 +1105,16 @@ async fn gemini_spawned_child_empty_turn_is_retried_into_a_report() -> Result<()
     let _parent_initial = mount_gemini_sse_once_match(
         server,
         |req| {
-            body_contains(req, GEMINI_EMPTY_RETRY_PARENT_PROMPT)
+            body_contains(req, GEMINI_EMPTY_GRACE_PARENT_PROMPT)
                 && !body_contains(req, r#""functionResponse""#)
         },
         gemini_function_call_sse(
             "spawn_agent",
             json!({
-                "message": GEMINI_EMPTY_RETRY_CHILD_PROMPT,
-                "task_name": "empty_retry_worker",
+                "message": GEMINI_EMPTY_GRACE_CHILD_PROMPT,
+                "task_name": "empty_grace_worker",
             }),
-            Some("sig-spawn-empty-retry"),
+            Some("sig-spawn-empty-grace"),
         ),
         /*response_delay*/ None,
     )
@@ -1157,7 +1122,7 @@ async fn gemini_spawned_child_empty_turn_is_retried_into_a_report() -> Result<()
     let _parent_after_spawn = mount_gemini_sse_once_match(
         server,
         |req| {
-            body_contains(req, GEMINI_EMPTY_RETRY_PARENT_PROMPT)
+            body_contains(req, GEMINI_EMPTY_GRACE_PARENT_PROMPT)
                 && body_contains(req, r#""functionResponse""#)
                 && body_contains(req, r#""name":"spawn_agent""#)
                 && !body_contains(req, "<subagent_notification>")
@@ -1170,19 +1135,22 @@ async fn gemini_spawned_child_empty_turn_is_retried_into_a_report() -> Result<()
     let _child_initial = mount_gemini_sse_once_match(
         server,
         |req| {
-            body_contains(req, GEMINI_EMPTY_RETRY_CHILD_PROMPT)
-                && !body_contains(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER)
+            body_contains(req, GEMINI_EMPTY_GRACE_CHILD_PROMPT)
+                && !body_contains(req, GEMINI_COMPLETE_TASK_GRACE_MARKER)
         },
         gemini_empty_sse(),
         /*response_delay*/ None,
     )
     .await;
-    // The bounded retry re-prompts the child; the retry request carries the re-prompt marker and
-    // this time the child returns a real report.
-    let _child_retry = mount_gemini_sse_once_match(
+    // The one-shot grace prompt tells the child to call complete_task.
+    let _child_grace = mount_gemini_sse_once_match(
         server,
-        |req| body_contains(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER),
-        gemini_text_sse(GEMINI_EMPTY_RETRY_REPORT),
+        |req| body_contains(req, GEMINI_COMPLETE_TASK_GRACE_MARKER),
+        gemini_function_call_sse(
+            "complete_task",
+            json!({ "result": GEMINI_EMPTY_GRACE_REPORT, "status": "completed" }),
+            Some("sig-child-empty-grace-complete-task"),
+        ),
         /*response_delay*/ None,
     )
     .await;
@@ -1197,7 +1165,7 @@ async fn gemini_spawned_child_empty_turn_is_retried_into_a_report() -> Result<()
 
     harness
         .test()
-        .submit_turn(GEMINI_EMPTY_RETRY_PARENT_PROMPT)
+        .submit_turn(GEMINI_EMPTY_GRACE_PARENT_PROMPT)
         .await?;
     let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
     let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
@@ -1208,8 +1176,10 @@ async fn gemini_spawned_child_empty_turn_is_retried_into_a_report() -> Result<()
         if matches!(status, AgentStatus::Completed(_)) {
             assert_eq!(
                 status,
-                AgentStatus::Completed(Some(GEMINI_EMPTY_RETRY_REPORT.to_string())),
-                "an empty first child turn must be retried into a non-null report"
+                AgentStatus::Completed(Some(format!(
+                    "Sub-agent task completed:\n{GEMINI_EMPTY_GRACE_REPORT}"
+                ))),
+                "an empty first child turn must be completed through complete_task grace"
             );
             break;
         }
@@ -1234,11 +1204,136 @@ async fn gemini_spawned_child_empty_turn_is_retried_into_a_report() -> Result<()
     Ok(())
 }
 
-// O24/O27: when a Gemini-native spawned sub-agent stays empty even after BOTH bounded retries,
-// the turn falls through to the unchanged terminal path and the child completes `Completed(None)`.
-// This pins the bound (exactly two retries, MAX = 2) and the clean O23b/O25d fallback.
+// O27 Lever 2: a Gemini spawned sub-agent that finalizes by calling `complete_task` completes
+// with its bounded result as the completion — even though the completion arrived via a tool call.
+// This pins the `run_turn` override short-circuit: a tool call sets needs_follow_up, so without the
+// short-circuit the turn would re-sample (functionResponse) instead of completing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_spawned_child_still_empty_after_retry_completes_null() -> Result<()> {
+async fn gemini_spawned_child_complete_task_becomes_the_completion() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    }))
+    .await?;
+    let server = harness.server();
+    let _parent_initial = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_COMPLETE_TASK_PARENT_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "spawn_agent",
+            json!({
+                "message": GEMINI_COMPLETE_TASK_CHILD_PROMPT,
+                "task_name": "complete_task_worker",
+            }),
+            Some("sig-spawn-complete-task"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    let _parent_after_spawn = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_COMPLETE_TASK_PARENT_PROMPT)
+                && body_contains(req, r#""functionResponse""#)
+                && body_contains(req, r#""name":"spawn_agent""#)
+                && !body_contains(req, "<subagent_notification>")
+        },
+        gemini_text_sse("parent waiting for child report"),
+        /*response_delay*/ None,
+    )
+    .await;
+    // The child finalizes by calling complete_task — a tool call. The override turns this into the
+    // completion; matcher requires no functionResponse so a re-sampled child turn would NOT match.
+    let child_complete = mount_gemini_sse_once_match(
+        server,
+        |req| {
+            body_contains(req, GEMINI_COMPLETE_TASK_CHILD_PROMPT)
+                && !body_contains(req, r#""functionResponse""#)
+        },
+        gemini_function_call_sse(
+            "complete_task",
+            json!({ "result": GEMINI_COMPLETE_TASK_REPORT, "status": "completed" }),
+            Some("sig-child-complete-task"),
+        ),
+        /*response_delay*/ None,
+    )
+    .await;
+    // The bounded result wakes the Gemini parent to synthesize.
+    let synthesis = mount_gemini_sse_once_match(
+        server,
+        |req| body_contains(req, "<subagent_notification>"),
+        gemini_text_sse("synthesized child complete_task result"),
+        /*response_delay*/ None,
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn(GEMINI_COMPLETE_TASK_PARENT_PROMPT)
+        .await?;
+    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
+    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
+    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
+    let expected = format!("Sub-agent task completed:\n{GEMINI_COMPLETE_TASK_REPORT}");
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let status = child_thread.agent_status().await;
+        if matches!(status, AgentStatus::Completed(_)) {
+            assert_eq!(
+                status,
+                AgentStatus::Completed(Some(expected.clone())),
+                "complete_task result must become the child's scoped completion"
+            );
+            let AgentStatus::Completed(Some(report)) = &status else {
+                unreachable!("matched completed status above");
+            };
+            assert!(
+                !report.starts_with("status:"),
+                "forwarded complete_task completion must not use the global status prefix"
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    // The override fires in the same turn as the complete_task call: the child must NOT be re-sampled
+    // with a functionResponse follow-up — exactly one matching child request.
+    assert_eq!(
+        child_complete.requests().len(),
+        1,
+        "complete_task must finalize the turn without a follow-up sampling request"
+    );
+
+    // Drain the parent synthesis so the synthesis mock's `expect(1)` is satisfied.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if !synthesis.requests().is_empty() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent synthesis request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    Ok(())
+}
+
+// O27 Lever 2 / 2b: when a Gemini-native spawned sub-agent still does not call `complete_task`
+// after the one-shot grace turn, the child completes with a synthesized failed result instead of
+// `Completed(None)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_spawned_child_still_empty_after_grace_synthesizes_failed_result() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
@@ -1278,32 +1373,29 @@ async fn gemini_spawned_child_still_empty_after_retry_completes_null() -> Result
         /*response_delay*/ None,
     )
     .await;
-    // First child turn: empty (no re-prompt marker recorded yet).
+    // First child turn: empty (no grace marker recorded yet).
     let _child_initial = mount_gemini_sse_once_match(
         server,
         |req| {
             body_contains(req, GEMINI_STILL_EMPTY_CHILD_PROMPT)
-                && body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 0
+                && body_marker_count(req, GEMINI_COMPLETE_TASK_GRACE_MARKER) == 0
         },
         gemini_empty_sse(),
         /*response_delay*/ None,
     )
     .await;
-    // First bounded retry (the marker has been recorded once) — still empty.
-    let _child_retry_1 = mount_gemini_sse_once_match(
+    // One-shot complete_task grace — still empty.
+    let _child_grace = mount_gemini_sse_once_match(
         server,
-        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 1,
+        |req| body_marker_count(req, GEMINI_COMPLETE_TASK_GRACE_MARKER) == 1,
         gemini_empty_sse(),
         /*response_delay*/ None,
     )
     .await;
-    // Second (final) bounded retry (the marker has been recorded twice) — also empty. With MAX = 2
-    // there is no further retry; a fourth request would 404 (mock exhausted) and the child would not
-    // reach `Completed(None)`, so this also pins the new bound.
-    let _child_retry_2 = mount_gemini_sse_once_match(
+    let synthesis = mount_gemini_sse_once_match(
         server,
-        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 2,
-        gemini_empty_sse(),
+        |req| body_contains(req, "<subagent_notification>"),
+        gemini_text_sse("synthesized missing complete_task failure"),
         /*response_delay*/ None,
     )
     .await;
@@ -1321,8 +1413,10 @@ async fn gemini_spawned_child_still_empty_after_retry_completes_null() -> Result
         if matches!(status, AgentStatus::Completed(_)) {
             assert_eq!(
                 status,
-                AgentStatus::Completed(None),
-                "a child that stays empty after the bounded retry must complete null"
+                AgentStatus::Completed(Some(format!(
+                    "Sub-agent task failed:\n{GEMINI_MISSING_COMPLETE_TASK_FAILURE}"
+                ))),
+                "a child that stays empty after complete_task grace must complete with a failed result"
             );
             break;
         }
@@ -1332,14 +1426,30 @@ async fn gemini_spawned_child_still_empty_after_retry_completes_null() -> Result
         sleep(Duration::from_millis(10)).await;
     }
 
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if !synthesis.requests().is_empty() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent synthesis request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
     Ok(())
 }
 
-// O27: a Gemini-native spawned sub-agent that is empty on its first turn AND on its first bounded
-// retry recovers on the SECOND retry (MAX = 2), producing a non-null report. Pins the raised bound.
+// O27 Lever 2 / 2b: if a Gemini spawned child tries to end with a plain assistant message instead
+// of `complete_task`, the one-shot grace fires. If grace still omits `complete_task`, the synthesized
+// failed result uses the recovered assistant report rather than dropping to a placeholder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_spawned_child_recovers_on_second_retry() -> Result<()> {
+async fn gemini_spawned_child_missing_complete_task_synthesizes_recovered_report() -> Result<()> {
     skip_if_no_network!(Ok(()));
+
+    const PARENT_PROMPT: &str = "spawn a child that reports without complete_task";
+    const CHILD_PROMPT: &str = "child: report as assistant text but do not call complete_task";
+    const RECOVERED_REPORT: &str = "plain assistant report recovered for synthesis";
 
     let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
         config
@@ -1351,17 +1461,14 @@ async fn gemini_spawned_child_recovers_on_second_retry() -> Result<()> {
     let server = harness.server();
     let _parent_initial = mount_gemini_sse_once_match(
         server,
-        |req| {
-            body_contains(req, GEMINI_SECOND_RETRY_PARENT_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
+        |req| body_contains(req, PARENT_PROMPT) && !body_contains(req, r#""functionResponse""#),
         gemini_function_call_sse(
             "spawn_agent",
             json!({
-                "message": GEMINI_SECOND_RETRY_CHILD_PROMPT,
-                "task_name": "second_retry_worker",
+                "message": CHILD_PROMPT,
+                "task_name": "missing_complete_task_worker",
             }),
-            Some("sig-spawn-second-retry"),
+            Some("sig-spawn-missing-complete-task"),
         ),
         /*response_delay*/ None,
     )
@@ -1369,7 +1476,7 @@ async fn gemini_spawned_child_recovers_on_second_retry() -> Result<()> {
     let _parent_after_spawn = mount_gemini_sse_once_match(
         server,
         |req| {
-            body_contains(req, GEMINI_SECOND_RETRY_PARENT_PROMPT)
+            body_contains(req, PARENT_PROMPT)
                 && body_contains(req, r#""functionResponse""#)
                 && body_contains(req, r#""name":"spawn_agent""#)
                 && !body_contains(req, "<subagent_notification>")
@@ -1378,53 +1485,45 @@ async fn gemini_spawned_child_recovers_on_second_retry() -> Result<()> {
         /*response_delay*/ None,
     )
     .await;
-    // First child turn: empty (no re-prompt marker yet).
+    // First child turn: assistant text, but still no complete_task.
     let _child_initial = mount_gemini_sse_once_match(
         server,
         |req| {
-            body_contains(req, GEMINI_SECOND_RETRY_CHILD_PROMPT)
-                && body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 0
+            body_contains(req, CHILD_PROMPT)
+                && body_marker_count(req, GEMINI_COMPLETE_TASK_GRACE_MARKER) == 0
         },
+        gemini_text_sse(RECOVERED_REPORT),
+        /*response_delay*/ None,
+    )
+    .await;
+    // Grace turn still omits complete_task; synthesize a failed result from the recovered report.
+    let _child_grace = mount_gemini_sse_once_match(
+        server,
+        |req| body_marker_count(req, GEMINI_COMPLETE_TASK_GRACE_MARKER) == 1,
         gemini_empty_sse(),
         /*response_delay*/ None,
     )
     .await;
-    // First bounded retry (marker recorded once): still empty.
-    let _child_retry_1 = mount_gemini_sse_once_match(
+    let synthesis = mount_gemini_sse_once_match(
         server,
-        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 1,
-        gemini_empty_sse(),
+        |req| body_contains(req, "<subagent_notification>"),
+        gemini_text_sse("synthesized recovered missing complete_task report"),
         /*response_delay*/ None,
     )
     .await;
-    // Second bounded retry (marker recorded twice): recovers with a real report.
-    let _child_retry_2 = mount_gemini_sse_once_match(
-        server,
-        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 2,
-        gemini_text_sse(GEMINI_SECOND_RETRY_REPORT),
-        /*response_delay*/ None,
-    )
-    .await;
-    // No parent-synthesis mock: this test pins the CHILD recovering on the second retry. How the
-    // parent is subsequently woken (subagent_notification vs. the Gemini goal-continuation backstop)
-    // is an orchestration concern covered by the O27 structural-completion tests, and it races here,
-    // so any later parent request is left to 404 harmlessly.
 
-    harness
-        .test()
-        .submit_turn(GEMINI_SECOND_RETRY_PARENT_PROMPT)
-        .await?;
+    harness.test().submit_turn(PARENT_PROMPT).await?;
     let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
     let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
     let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let status = child_thread.agent_status().await;
         if matches!(status, AgentStatus::Completed(_)) {
             assert_eq!(
                 status,
-                AgentStatus::Completed(Some(GEMINI_SECOND_RETRY_REPORT.to_string())),
-                "a child empty on turn 1 and retry 1 must recover on retry 2 (MAX = 2)"
+                AgentStatus::Completed(Some(format!("Sub-agent task failed:\n{RECOVERED_REPORT}"))),
+                "missing complete_task synthesis must use the recovered report body"
             );
             break;
         }
@@ -1434,20 +1533,32 @@ async fn gemini_spawned_child_recovers_on_second_retry() -> Result<()> {
         sleep(Duration::from_millis(10)).await;
     }
 
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if !synthesis.requests().is_empty() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for parent synthesis request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+
     Ok(())
 }
 
-// Note: the grounding-free behaviour of the retry turn itself (suppress ⇒ `GeminiSearchMode::Off`)
-// is pinned by the deterministic `empty_report_retry_turn_is_sampled_grounding_free` unit test in
+// Note: the grounding-free behaviour of the grace turn itself (suppress ⇒ `GeminiSearchMode::Off`)
+// is pinned by the deterministic `complete_task_grace_turn_is_sampled_grounding_free` unit test in
 // `session/turn_tests.rs`, composed with `gemini_search_modes_control_tools_grounding_and_hybrid_nudge`
 // (Off ⇒ no `googleSearch`). It is not asserted here because a mock-harness child re-seeds its search
 // mode from env per session and is not grounded by `submit_thread_settings`, so an integration
 // assertion on `googleSearch` would not be faithful.
 
-// O24 gating: the retry is `is_spawned_subagent`-gated, so a non-spawned (root) Gemini turn that
-// ends empty must NOT retry — it makes exactly one model request and completes as-is.
+// O27 gating: the complete_task grace prompt is `is_spawned_subagent`-gated, so a non-spawned
+// (root) Gemini turn that ends empty must NOT receive it — it makes exactly one model request and
+// completes as-is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_root_empty_turn_is_not_retried() -> Result<()> {
+async fn gemini_root_empty_turn_does_not_get_complete_task_grace() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(mock_gemini_builder()).await?;
@@ -1465,16 +1576,17 @@ async fn gemini_root_empty_turn_is_not_retried() -> Result<()> {
     assert_eq!(
         root.requests().len(),
         1,
-        "a non-spawned (root) Gemini empty turn must not trigger the spawned-subagent retry"
+        "a non-spawned (root) Gemini empty turn must not trigger the spawned-subagent grace prompt"
     );
 
     Ok(())
 }
 
-// O24 gating: the retry is `wire_api == GeminiNative`-gated, so a non-Gemini (Responses) spawned
-// child that ends empty must NOT retry — it makes exactly one request and completes `Completed(None)`.
+// O27 gating: the grace prompt is `wire_api == GeminiNative`-gated, so a non-Gemini (Responses)
+// spawned child that ends empty must NOT receive it — it makes exactly one request and completes
+// `Completed(None)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_spawned_child_empty_turn_is_not_retried() -> Result<()> {
+async fn responses_spawned_child_empty_turn_does_not_get_complete_task_grace() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -1540,7 +1652,7 @@ async fn responses_spawned_child_empty_turn_is_not_retried() -> Result<()> {
             assert_eq!(
                 status,
                 AgentStatus::Completed(None),
-                "a non-Gemini (Responses) spawned child empty turn must not be retried"
+                "a non-Gemini (Responses) spawned child empty turn must not receive Gemini grace"
             );
             break;
         }
@@ -1549,270 +1661,25 @@ async fn responses_spawned_child_empty_turn_is_not_retried() -> Result<()> {
         }
         sleep(Duration::from_millis(10)).await;
     }
-    // The retry is `wire_api == GeminiNative`-gated, so its re-prompt must never be injected on
-    // the Responses path. (`ResponseMock` records every request it is offered to match, including
+    // The grace prompt is `wire_api == GeminiNative`-gated, so it must never be injected on the
+    // Responses path. (`ResponseMock` records every request it is offered to match, including
     // the parent's, so an exact request count is not a reliable signal here — assert on the
-    // re-prompt marker instead.)
+    // grace marker instead.)
     assert!(
         child_mock
             .requests()
             .iter()
-            .all(|req| !req.body_contains_text(GEMINI_EMPTY_REPORT_REPROMPT_MARKER)),
-        "the Gemini empty-report retry must never re-prompt a Responses spawned child"
+            .all(|req| !req.body_contains_text(GEMINI_COMPLETE_TASK_GRACE_MARKER)),
+        "the Gemini complete_task grace prompt must never reach a Responses spawned child"
     );
 
     Ok(())
 }
 
-// O27 Lever 1 (a): a Gemini spawned child's OVERSIZED report is condensed once at forward time, so
-// the parent's notification carries the bounded summary rather than the verbatim report.
+// On the non-Gemini (Responses) wire api the forward path is byte-identical — even an oversized
+// report is forwarded verbatim. Exercises the same `forward_child_completion_to_parent` seam under V2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_large_child_report_is_forwarded_as_summary() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
-        config
-            .features
-            .enable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
-    }))
-    .await?;
-    let server = harness.server();
-    let large_report = oversized_report(LARGE_REPORT_VERBATIM_SENTINEL);
-
-    let _parent_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_LARGE_PARENT_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
-        gemini_function_call_sse(
-            "spawn_agent",
-            json!({
-                "message": GEMINI_LARGE_CHILD_PROMPT,
-                "task_name": "large_report_worker",
-            }),
-            Some("sig-spawn-large-report"),
-        ),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _parent_after_spawn = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_LARGE_PARENT_PROMPT)
-                && body_contains(req, r#""functionResponse""#)
-                && body_contains(req, r#""name":"spawn_agent""#)
-                && !body_contains(req, "<subagent_notification>")
-        },
-        gemini_text_sse("parent waiting for child report"),
-        /*response_delay*/ None,
-    )
-    .await;
-    // Delay the child so the parent finishes its post-spawn turn and is idle when the (condensed)
-    // notification wakes it — keeps the wake/synthesis ordering deterministic.
-    let _child_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_LARGE_CHILD_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
-        gemini_text_sse(&large_report),
-        Some(Duration::from_secs(1)),
-    )
-    .await;
-    // The forward-time summarize call carries the instruction + full report; condense it.
-    let summarize = mount_gemini_sse_once_match(
-        server,
-        |req| body_contains(req, SUMMARIZE_INSTRUCTION_MARKER),
-        gemini_text_sse(&format!("{CONDENSED_SUMMARY_SENTINEL} condensed worker report")),
-        /*response_delay*/ None,
-    )
-    .await;
-    let synthesis = mount_gemini_sse_once_match(
-        server,
-        |req| body_contains(req, "<subagent_notification>"),
-        gemini_text_sse("synthesized condensed child report"),
-        /*response_delay*/ None,
-    )
-    .await;
-
-    harness
-        .test()
-        .submit_turn(GEMINI_LARGE_PARENT_PROMPT)
-        .await?;
-    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
-    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
-    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
-    // The child's OWN status keeps the full report; only the forwarded copy is condensed.
-    let deadline = Instant::now() + Duration::from_secs(6);
-    loop {
-        let status = child_thread.agent_status().await;
-        if matches!(status, AgentStatus::Completed(_)) {
-            assert_eq!(status, AgentStatus::Completed(Some(large_report.clone())));
-            break;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(6);
-    let captured = loop {
-        let captured = synthesis.requests();
-        if !captured.is_empty() {
-            break captured;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for parent synthesis request");
-        }
-        sleep(Duration::from_millis(10)).await;
-    };
-
-    // The summarize call fired exactly once and received the full report to condense.
-    let summarize_reqs = summarize.requests();
-    assert_eq!(summarize_reqs.len(), 1, "exactly one summarize call expected");
-    assert!(
-        gemini_content_texts(&summarize_reqs)
-            .iter()
-            .any(|t| t.contains(LARGE_REPORT_VERBATIM_SENTINEL)),
-        "summarize request must carry the full report to condense"
-    );
-
-    // The parent synthesis sees the CONDENSED body, never the verbatim report.
-    let synthesis_texts = gemini_content_texts(&captured);
-    assert!(
-        synthesis_texts.iter().any(|t| t.contains("<subagent_notification>")
-            && t.contains(CONDENSED_SUMMARY_SENTINEL)),
-        "parent notification must carry the condensed summary: {synthesis_texts:?}"
-    );
-    assert!(
-        synthesis_texts
-            .iter()
-            .all(|t| !t.contains(LARGE_REPORT_VERBATIM_SENTINEL)),
-        "verbatim oversized report must NOT reach the parent: {synthesis_texts:?}"
-    );
-
-    Ok(())
-}
-
-// O27 Lever 1 (b): a Gemini child report UNDER the threshold is forwarded verbatim, with no
-// forward-time summarize call.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_small_child_report_is_forwarded_verbatim() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
-        config
-            .features
-            .enable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
-    }))
-    .await?;
-    let server = harness.server();
-
-    let _parent_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_SMALL_PARENT_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
-        gemini_function_call_sse(
-            "spawn_agent",
-            json!({
-                "message": GEMINI_SMALL_CHILD_PROMPT,
-                "task_name": "small_report_worker",
-            }),
-            Some("sig-spawn-small-report"),
-        ),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _parent_after_spawn = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_SMALL_PARENT_PROMPT)
-                && body_contains(req, r#""functionResponse""#)
-                && body_contains(req, r#""name":"spawn_agent""#)
-                && !body_contains(req, "<subagent_notification>")
-        },
-        gemini_text_sse("parent waiting for child report"),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _child_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_SMALL_CHILD_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
-        gemini_text_sse(GEMINI_SMALL_REPORT),
-        Some(Duration::from_secs(1)),
-    )
-    .await;
-    let synthesis = mount_gemini_sse_once_match(
-        server,
-        |req| body_contains(req, "<subagent_notification>"),
-        gemini_text_sse("synthesized small child report"),
-        /*response_delay*/ None,
-    )
-    .await;
-
-    harness
-        .test()
-        .submit_turn(GEMINI_SMALL_PARENT_PROMPT)
-        .await?;
-    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
-    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
-    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
-    let deadline = Instant::now() + Duration::from_secs(6);
-    loop {
-        let status = child_thread.agent_status().await;
-        if matches!(status, AgentStatus::Completed(_)) {
-            assert_eq!(
-                status,
-                AgentStatus::Completed(Some(GEMINI_SMALL_REPORT.to_string()))
-            );
-            break;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(6);
-    let captured = loop {
-        let captured = synthesis.requests();
-        if !captured.is_empty() {
-            break captured;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for parent synthesis request");
-        }
-        sleep(Duration::from_millis(10)).await;
-    };
-
-    let synthesis_texts = gemini_content_texts(&captured);
-    assert!(
-        synthesis_texts.iter().any(|t| t.contains("<subagent_notification>")
-            && t.contains(GEMINI_SMALL_REPORT)),
-        "a small report must be forwarded verbatim: {synthesis_texts:?}"
-    );
-    assert!(
-        !server_saw_marker(server, SUMMARIZE_INSTRUCTION_MARKER).await,
-        "a sub-threshold report must NOT trigger a summarize call"
-    );
-
-    Ok(())
-}
-
-// O27 Lever 1 (c): on the non-Gemini (Responses) wire api the forward path is byte-identical — even
-// an oversized report is forwarded verbatim and no summarize call is ever issued (the step is gated
-// on `WireApi::GeminiNative`). Exercises the same `forward_child_completion_to_parent` seam under V2.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_child_report_is_forwarded_verbatim_without_summarize() -> Result<()> {
+async fn responses_child_report_is_forwarded_verbatim() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -1923,229 +1790,6 @@ async fn responses_child_report_is_forwarded_verbatim_without_summarize() -> Res
             .iter()
             .any(|req| body_contains(req, LARGE_REPORT_VERBATIM_SENTINEL)),
         "the Responses path must forward the full report verbatim into the parent's context"
-    );
-    assert!(
-        received
-            .iter()
-            .all(|req| !body_contains(req, SUMMARIZE_INSTRUCTION_MARKER)),
-        "the Responses path must never issue a summarize request (gate is GeminiNative-only)"
-    );
-
-    Ok(())
-}
-
-// O27 Lever 1 (d): if the forward-time summarizer fails (here: empty output), the FULL report is
-// forwarded unchanged — a summarize step must never drop a child's section.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_child_report_summarizer_failure_falls_back_to_full_report() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
-        config
-            .features
-            .enable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
-    }))
-    .await?;
-    let server = harness.server();
-    let large_report = oversized_report(LARGE_REPORT_VERBATIM_SENTINEL);
-
-    let _parent_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_FALLBACK_PARENT_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
-        gemini_function_call_sse(
-            "spawn_agent",
-            json!({
-                "message": GEMINI_FALLBACK_CHILD_PROMPT,
-                "task_name": "fallback_worker",
-            }),
-            Some("sig-spawn-fallback"),
-        ),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _parent_after_spawn = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_FALLBACK_PARENT_PROMPT)
-                && body_contains(req, r#""functionResponse""#)
-                && body_contains(req, r#""name":"spawn_agent""#)
-                && !body_contains(req, "<subagent_notification>")
-        },
-        gemini_text_sse("parent waiting for child report"),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _child_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_FALLBACK_CHILD_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
-        gemini_text_sse(&large_report),
-        Some(Duration::from_secs(1)),
-    )
-    .await;
-    // Summarizer returns an empty completion → `summarize_child_report` yields `None` → fall back.
-    let summarize = mount_gemini_sse_once_match(
-        server,
-        |req| body_contains(req, SUMMARIZE_INSTRUCTION_MARKER),
-        gemini_empty_sse(),
-        /*response_delay*/ None,
-    )
-    .await;
-    let synthesis = mount_gemini_sse_once_match(
-        server,
-        |req| body_contains(req, "<subagent_notification>"),
-        gemini_text_sse("synthesized fallback child report"),
-        /*response_delay*/ None,
-    )
-    .await;
-
-    harness
-        .test()
-        .submit_turn(GEMINI_FALLBACK_PARENT_PROMPT)
-        .await?;
-    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
-    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
-    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
-    let deadline = Instant::now() + Duration::from_secs(6);
-    loop {
-        let status = child_thread.agent_status().await;
-        if matches!(status, AgentStatus::Completed(_)) {
-            assert_eq!(status, AgentStatus::Completed(Some(large_report.clone())));
-            break;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(6);
-    let captured = loop {
-        let captured = synthesis.requests();
-        if !captured.is_empty() {
-            break captured;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for parent synthesis request");
-        }
-        sleep(Duration::from_millis(10)).await;
-    };
-
-    // The summarize was attempted, but on failure the parent receives the FULL report verbatim.
-    assert_eq!(summarize.requests().len(), 1, "summarize should be attempted");
-    let synthesis_texts = gemini_content_texts(&captured);
-    assert!(
-        synthesis_texts.iter().any(|t| t.contains("<subagent_notification>")
-            && t.contains(LARGE_REPORT_VERBATIM_SENTINEL)),
-        "summarizer failure must fall back to the full report: {synthesis_texts:?}"
-    );
-
-    Ok(())
-}
-
-// O27 Lever 1 (e): a Gemini child that completes empty (`Completed(None)`) still hits the O25d
-// early-return BEFORE the new summarize step — no summarize call and no parent notification.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn gemini_empty_completion_skips_summarize_and_notification() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
-        config
-            .features
-            .enable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
-    }))
-    .await?;
-    let server = harness.server();
-
-    let _parent_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT)
-                && !body_contains(req, r#""functionResponse""#)
-        },
-        gemini_function_call_sse(
-            "spawn_agent",
-            json!({
-                "message": GEMINI_EMPTY_NOSUMMARIZE_CHILD_PROMPT,
-                "task_name": "empty_nosummarize_worker",
-            }),
-            Some("sig-spawn-empty-nosummarize"),
-        ),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _parent_after_spawn = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT)
-                && body_contains(req, r#""functionResponse""#)
-                && body_contains(req, r#""name":"spawn_agent""#)
-                && !body_contains(req, "<subagent_notification>")
-        },
-        gemini_text_sse("parent waiting for child report"),
-        /*response_delay*/ None,
-    )
-    .await;
-    // Child is empty on its first turn and on both bounded retries → `Completed(None)`.
-    let _child_initial = mount_gemini_sse_once_match(
-        server,
-        |req| {
-            body_contains(req, GEMINI_EMPTY_NOSUMMARIZE_CHILD_PROMPT)
-                && body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 0
-        },
-        gemini_empty_sse(),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _child_retry_1 = mount_gemini_sse_once_match(
-        server,
-        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 1,
-        gemini_empty_sse(),
-        /*response_delay*/ None,
-    )
-    .await;
-    let _child_retry_2 = mount_gemini_sse_once_match(
-        server,
-        |req| body_marker_count(req, GEMINI_EMPTY_REPORT_REPROMPT_MARKER) == 2,
-        gemini_empty_sse(),
-        /*response_delay*/ None,
-    )
-    .await;
-
-    harness
-        .test()
-        .submit_turn(GEMINI_EMPTY_NOSUMMARIZE_PARENT_PROMPT)
-        .await?;
-    let spawned_id = wait_for_spawned_thread_id(harness.test()).await?;
-    let spawned_id = ThreadId::from_string(&spawned_id).map_err(anyhow::Error::msg)?;
-    let child_thread = harness.test().thread_manager.get_thread(spawned_id).await?;
-    let deadline = Instant::now() + Duration::from_secs(6);
-    loop {
-        let status = child_thread.agent_status().await;
-        if matches!(status, AgentStatus::Completed(_)) {
-            assert_eq!(status, AgentStatus::Completed(None));
-            break;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for child completion, last status: {status:?}");
-        }
-        sleep(Duration::from_millis(10)).await;
-    }
-
-    assert!(
-        !server_saw_marker(server, SUMMARIZE_INSTRUCTION_MARKER).await,
-        "an empty completion must not reach the summarize step (O25d returns first)"
-    );
-    assert!(
-        !server_saw_marker(server, "<subagent_notification>").await,
-        "an empty completion must not produce a parent notification (O25d untouched)"
     );
 
     Ok(())

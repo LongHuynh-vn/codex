@@ -295,9 +295,7 @@ async fn gemini_subagent_tools_are_flat_multi_agent_v2_functions() -> Result<()>
             .as_str()
             .is_some_and(|description| description
                 .contains("wait_agent` until you have received a final-status notification")
-                && description.contains(
-                    "deliver your complete result as your final-channel plain-text message"
-                )),
+                && description.contains("finalize by calling `complete_task`")),
         "Gemini spawn_agent declaration must include subagent wait guidance: {spawn_agent_declaration:?}"
     );
 

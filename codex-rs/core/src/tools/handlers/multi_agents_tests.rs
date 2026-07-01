@@ -20,6 +20,7 @@ use crate::tools::handlers::UpdateGoalHandler;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::CompleteTaskHandler as CompleteTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
@@ -2339,6 +2340,47 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                         && !communication.trigger_turn
             )
     }));
+}
+
+#[tokio::test]
+async fn complete_task_rejects_empty_result() {
+    // O27 Lever 2 / 2a: an empty/whitespace report is rejected so the model retries instead of
+    // "completing" with nothing — no stash is set, so the run_turn override does not fire.
+    let (session, turn) = make_session_and_context().await;
+    let Err(err) = CompleteTaskHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "complete_task",
+            function_payload(json!({ "result": "   " })),
+        ))
+        .await
+    else {
+        panic!("complete_task should reject an empty result");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "complete_task requires a non-empty `result` containing your final report.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn complete_task_accepts_a_result_and_returns_minimal_output() {
+    // A valid result is accepted and produces the minimal tool output (the completion is delivered
+    // via run_turn from the stash, not via this tool output).
+    let (session, turn) = make_session_and_context().await;
+    let output = CompleteTaskHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "complete_task",
+            function_payload(json!({ "result": "found the bug in foo.rs", "status": "completed" })),
+        ))
+        .await
+        .expect("complete_task should accept a non-empty result");
+    assert_eq!(expect_text_output(output), (String::new(), Some(true)));
 }
 
 #[tokio::test]

@@ -364,6 +364,42 @@ pub fn create_close_agent_tool_v2() -> ToolSpec {
     })
 }
 
+/// O27 Lever 2 / 2a: the Gemini child-only `complete_task` tool. A spawned sub-agent calls it to
+/// submit its bounded final report; that result becomes the child's completion (see `run_turn`).
+/// Registered only for GeminiNative spawned children, so the OpenAI/Responses surface is unchanged.
+pub fn create_complete_task_tool_v2() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "result".to_string(),
+            JsonSchema::string(Some(
+                "Your final report for the delegated task: concrete findings, file paths, commands, decisions, and the conclusion the orchestrator can act on WITHOUT your transcript. Keep it under ~2000 words. This is the ONLY way to finish your task.".to_string(),
+            )),
+        ),
+        (
+            "status".to_string(),
+            JsonSchema::string_enum(
+                vec![
+                    Value::String("completed".to_string()),
+                    Value::String("partial".to_string()),
+                    Value::String("failed".to_string()),
+                ],
+                Some(
+                    "completed = done; partial = best-effort / ran out of turns; failed = could not complete. Defaults to completed.".to_string(),
+                ),
+            ),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "complete_task".to_string(),
+        description: "Submit your final result and finish your delegated task. This is the ONLY way to finish: your parent receives exactly this result and nothing else from your transcript, so make it self-contained.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, Some(vec!["result".to_string()]), Some(false.into())),
+        output_schema: None,
+    })
+}
+
 fn agent_status_output_schema() -> Value {
     json!({
         "oneOf": [

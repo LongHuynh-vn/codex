@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 use crate::session::TurnInputQueue;
 use crate::session::turn_context::TurnContext;
 use crate::tasks::AnySessionTask;
+use crate::tools::handlers::multi_agents_v2::CompleteTaskResult;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TokenUsage;
@@ -96,6 +97,11 @@ pub(crate) struct TurnState {
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
     pub(crate) gemini_spawned_subagent_last_send_message_to_root: Option<String>,
+    /// O27 Lever 2 / 2a: the bounded result a Gemini spawned sub-agent submitted via the
+    /// `complete_task` tool this turn. When set, `run_turn` finalizes the child turn with this value
+    /// as `last_agent_message` (an explicit completion), overriding the implicit turn-end message.
+    /// Per-turn state, so it resets each turn; only ever written on the GeminiNative spawned-child path.
+    pub(crate) gemini_spawned_subagent_complete_task_result: Option<CompleteTaskResult>,
     /// Set when this turn invoked any of the orchestrator re-engagement tools
     /// (`spawn_agent`, `followup_task`, `send_message`). Read at turn-end to
     /// gate Gemini orchestration auto-completion: a turn that re-engaged a

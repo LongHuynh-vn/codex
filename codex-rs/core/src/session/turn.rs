@@ -53,6 +53,8 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::handlers::multi_agents_v2::CompleteTaskResult;
+use crate::tools::handlers::multi_agents_v2::CompleteTaskStatus;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolRouterParams;
@@ -122,24 +124,18 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
-/// Maximum number of times a Gemini-native spawned sub-agent turn that ends with no report
-/// (no terminal assistant text, no O14 last-non-empty fallback, no O17 send_message-to-root
-/// fallback) is re-prompted for its final report before the turn is allowed to complete as
-/// `Completed(None)`. Bounded and `run_turn`-scoped so it cannot loop. See O24.
-///
-/// Raised from 1 to 2 (O27): the dominant residual null is a retry turn that re-hits the same
-/// degenerate empty `STOP` while Google Search grounding is still attached. Each retry turn is now
-/// grounding-free (see `build_prompt`), and a second bounded attempt covers the rare case where the
-/// first grounding-free retry is itself empty.
-const MAX_GEMINI_EMPTY_REPORT_RETRIES: u32 = 2;
+/// Maximum number of one-shot grace prompts for a Gemini-native spawned sub-agent turn that reaches
+/// a natural terminal point without calling `complete_task`. Bounded and `run_turn`-scoped so it
+/// cannot loop.
+const MAX_GEMINI_COMPLETE_TASK_GRACE: u32 = 1;
 
-/// Re-prompt injected into a Gemini-native spawned sub-agent's history when it ends a turn with
-/// no report. Recorded as a `role:"user"` message so the child re-samples and produces its final
-/// assistant message on the retry. See O24. The retry turn is sampled grounding-free (O27), so the
-/// re-prompt also tells the child to stop researching and answer from what it already has. Keep the
-/// substring "without sending a final report" stable — the rollout null-probe and the
-/// `GEMINI_EMPTY_REPORT_REPROMPT_MARKER` tests match on it.
-const GEMINI_EMPTY_REPORT_REPROMPT: &str = "You ended your sub-agent turn without sending a final report, but your parent only receives your final assistant message. Respond now with ONLY your final report as a single plain-text assistant message summarizing what you found for your assigned task. Do not call any tools, do not use send_message, and do not continue researching — answer from what you already have. If you could not complete the task, say so briefly and include whatever partial findings you have.";
+/// Re-prompt injected into a Gemini-native spawned sub-agent's history when it tries to end without
+/// `complete_task`. The grace turn is sampled grounding-free so the child finalizes from already
+/// gathered work instead of continuing research.
+const GEMINI_COMPLETE_TASK_GRACE_PROMPT: &str = "You did not call complete_task before ending your delegated sub-agent turn. Your parent receives only the result submitted through complete_task. Call complete_task now with a self-contained final report in `result` and status `completed`, `partial`, or `failed`. Do not call any other tools, do not use send_message, and do not continue researching.";
+
+const GEMINI_COMPLETE_TASK_MISSING_RESULT: &str =
+    "complete_task was not called before the sub-agent turn ended.";
 
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
@@ -222,9 +218,10 @@ pub(crate) async fn run_turn(
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
     );
     let mut stop_hook_active = false;
-    // O24: counts empty-report re-prompts for this Gemini spawned-subagent turn. Resets per
-    // `run_turn` (i.e. per child turn), so it is model-undefeatable and the retry cannot loop.
-    let mut gemini_empty_report_retries: u32 = 0;
+    // Counts one-shot complete_task grace prompts for this Gemini spawned-subagent turn. Resets per
+    // `run_turn`, so it is model-undefeatable and cannot loop.
+    let mut gemini_complete_task_grace_attempts: u32 = 0;
+    let mut recovered_gemini_child_report_before_grace: Option<String> = None;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
     #[allow(deprecated)]
@@ -285,9 +282,9 @@ pub(crate) async fn run_turn(
             &mut client_session,
             turn_metadata_header.as_deref(),
             sampling_request_input.clone(),
-            // O27: a grounding-attached retry tends to re-hit the empty `STOP`. Once we have
-            // re-prompted at least once for an empty report, sample the retry turn grounding-free.
-            gemini_empty_report_retries > 0,
+            // The complete_task grace turn must finalize from already gathered work, not continue
+            // grounded research.
+            gemini_complete_task_grace_attempts > 0,
             cancellation_token.child_token(),
         )
         .await
@@ -297,6 +294,19 @@ pub(crate) async fn run_turn(
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
                 } = sampling_request_output;
+                // O27 Lever 2: a Gemini spawned sub-agent that submitted `complete_task` this
+                // turn finalizes NOW with its bounded result, regardless of needs_follow_up. The
+                // complete_task tool call itself set model_needs_follow_up=true, so without this
+                // short-circuit the loop would re-sample instead of completing. Placed before the
+                // needs_follow_up / termination logic; it intentionally bypasses the stop/legacy
+                // hooks for an explicit completion (same spirit as the termination block's `break`).
+                if wire_api == WireApi::GeminiNative
+                    && is_spawned_subagent
+                    && let Some(result) = take_complete_task_result(&sess, &turn_context).await
+                {
+                    last_agent_message = Some(render_complete_task_result(result));
+                    break;
+                }
                 if sampling_request_last_agent_message.is_some() {
                     last_non_empty_sampling_request_last_agent_message =
                         sampling_request_last_agent_message.clone();
@@ -386,38 +396,38 @@ pub(crate) async fn run_turn(
                         last_non_empty_sampling_request_last_agent_message.clone(),
                         send_message_to_root_fallback,
                     );
-                    // O24: a Gemini-native spawned sub-agent can end a turn with a degenerate
-                    // empty `STOP` (no assistant text, no tool call) and thus no report. When no
-                    // report was recovered from terminal text, the O14 last-non-empty fallback, or
-                    // the O17 send_message-to-root fallback (all consulted just above), the parent
-                    // would see `Completed(None)` and re-engage, overshooting its budget. Re-prompt
-                    // the child for its report inside its own turn, bounded, before the completion
-                    // surfaces. Placed after the fallbacks (so a recovered report never triggers a
-                    // retry) and before the stop/legacy hooks (so a retried, non-final turn does not
-                    // fire them). Mirrors the stop-hook continuation precedent below. The next loop
-                    // iteration samples the retry turn grounding-free (O27: `gemini_empty_report_retries
-                    // > 0` is passed to `run_sampling_request`), since the empty `STOP` correlates with
-                    // grounding being attached.
-                    if wire_api == WireApi::GeminiNative
-                        && is_spawned_subagent
-                        && last_agent_message.is_none()
-                        && gemini_empty_report_retries < MAX_GEMINI_EMPTY_REPORT_RETRIES
-                    {
-                        let reprompt = ResponseItem::Message {
-                            id: None,
-                            role: "user".to_string(),
-                            content: vec![ContentItem::InputText {
-                                text: GEMINI_EMPTY_REPORT_REPROMPT.to_string(),
-                            }],
-                            phase: None,
-                        };
-                        sess.record_conversation_items(
-                            &turn_context,
-                            std::slice::from_ref(&reprompt),
-                        )
-                        .await;
-                        gemini_empty_report_retries += 1;
-                        continue;
+                    if wire_api == WireApi::GeminiNative && is_spawned_subagent {
+                        if let Some(report) = last_agent_message.as_ref() {
+                            recovered_gemini_child_report_before_grace = Some(report.clone());
+                        }
+                        if gemini_complete_task_grace_attempts < MAX_GEMINI_COMPLETE_TASK_GRACE {
+                            let reprompt = ResponseItem::Message {
+                                id: None,
+                                role: "user".to_string(),
+                                content: vec![ContentItem::InputText {
+                                    text: GEMINI_COMPLETE_TASK_GRACE_PROMPT.to_string(),
+                                }],
+                                phase: None,
+                            };
+                            sess.record_conversation_items(
+                                &turn_context,
+                                std::slice::from_ref(&reprompt),
+                            )
+                            .await;
+                            gemini_complete_task_grace_attempts += 1;
+                            continue;
+                        }
+
+                        let synthesized_result = last_agent_message
+                            .clone()
+                            .or_else(|| recovered_gemini_child_report_before_grace.clone())
+                            .unwrap_or_else(|| GEMINI_COMPLETE_TASK_MISSING_RESULT.to_string());
+                        last_agent_message =
+                            Some(render_complete_task_result(CompleteTaskResult::new(
+                                CompleteTaskStatus::Failed,
+                                &synthesized_result,
+                            )));
+                        break;
                     }
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
@@ -1052,10 +1062,10 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
 }
 
 /// Resolves the per-request Gemini search mode. O27: a Gemini-native spawned sub-agent's
-/// empty-report retry turn is sampled grounding-free (`GeminiSearchMode::Off`), because the empty
-/// `STOP` that produces a null report correlates with Google Search grounding being attached.
-/// Otherwise the turn's configured mode is used unchanged. No-op for non-Gemini (the mode is only
-/// consumed when the request is built for `WireApi::GeminiNative`).
+/// complete_task grace turn is sampled grounding-free (`GeminiSearchMode::Off`) so the child
+/// finalizes from already gathered work. Otherwise the turn's configured mode is used unchanged.
+/// No-op for non-Gemini (the mode is only consumed when the request is built for
+/// `WireApi::GeminiNative`).
 fn prompt_gemini_search_mode(
     turn_search_mode: GeminiSearchMode,
     suppress_gemini_grounding: bool,
@@ -1072,7 +1082,7 @@ pub(crate) fn build_prompt(
     router: &ToolRouter,
     turn_context: &TurnContext,
     base_instructions: BaseInstructions,
-    // O27: when true (a Gemini-native spawned sub-agent's empty-report retry turn), sample
+    // O27: when true (a Gemini-native spawned sub-agent's complete_task grace turn), sample
     // grounding-free by forcing `GeminiSearchMode::Off`. No-op for non-Gemini.
     suppress_gemini_grounding: bool,
 ) -> Prompt {
@@ -1328,6 +1338,36 @@ fn effective_turn_last_agent_message(
     } else {
         terminal_last_agent_message
     }
+}
+
+/// O27 Lever 2: read and clear the `complete_task` result a Gemini spawned sub-agent stashed on
+/// its per-turn `TurnState` (mirrors how the O17 send_message-to-root fallback is read in `run_turn`).
+/// Returns the bounded result if `complete_task` was submitted this turn, else `None`. Clearing makes
+/// the read idempotent within the turn and prevents a stale result from leaking forward.
+async fn take_complete_task_result(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> Option<CompleteTaskResult> {
+    let turn_state = sess
+        .input_queue
+        .turn_state_for_sub_id(&sess.active_turn, &turn_context.sub_id)
+        .await?;
+
+    turn_state
+        .lock()
+        .await
+        .gemini_spawned_subagent_complete_task_result
+        .take()
+}
+
+fn render_complete_task_result(result: CompleteTaskResult) -> String {
+    let CompleteTaskResult { status, result } = result;
+    let header = match status {
+        CompleteTaskStatus::Completed => "Sub-agent task completed:",
+        CompleteTaskStatus::Partial => "Sub-agent task ended (partial):",
+        CompleteTaskStatus::Failed => "Sub-agent task failed:",
+    };
+    format!("{header}\n{result}")
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.

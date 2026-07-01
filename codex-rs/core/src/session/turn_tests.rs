@@ -50,10 +50,38 @@ fn effective_turn_last_agent_message_uses_fallback_for_gemini_spawned_subagent()
 }
 
 #[test]
-fn empty_report_retry_turn_is_sampled_grounding_free() {
-    // O27: a Gemini-native spawned sub-agent's empty-report retry turn (`suppress = true`) must be
-    // sampled grounding-free regardless of the turn's configured search mode, so the retry does not
-    // re-hit the grounding-correlated empty `STOP`.
+fn complete_task_result_renderer_scopes_status_prefix() {
+    let cases = [
+        (
+            CompleteTaskStatus::Completed,
+            "Sub-agent task completed:\nfinished",
+        ),
+        (
+            CompleteTaskStatus::Partial,
+            "Sub-agent task ended (partial):\nfinished",
+        ),
+        (
+            CompleteTaskStatus::Failed,
+            "Sub-agent task failed:\nfinished",
+        ),
+    ];
+
+    for (status, expected) in cases {
+        assert_eq!(
+            render_complete_task_result(CompleteTaskResult {
+                status,
+                result: "finished".to_string(),
+            }),
+            expected
+        );
+    }
+}
+
+#[test]
+fn complete_task_grace_turn_is_sampled_grounding_free() {
+    // O27: a Gemini-native spawned sub-agent's complete_task grace turn (`suppress = true`) must be
+    // sampled grounding-free regardless of the turn's configured search mode, so the child finalizes
+    // from already gathered work instead of continuing research.
     for mode in [
         GeminiSearchMode::Grounding,
         GeminiSearchMode::Hybrid,
@@ -63,10 +91,10 @@ fn empty_report_retry_turn_is_sampled_grounding_free() {
         assert_eq!(
             prompt_gemini_search_mode(mode, /*suppress_gemini_grounding*/ true),
             Some(GeminiSearchMode::Off),
-            "suppressed retry must force grounding-free for {mode:?}"
+            "suppressed grace turn must force grounding-free for {mode:?}"
         );
     }
-    // A non-retry turn (`suppress = false`) keeps its configured mode unchanged.
+    // A non-grace turn (`suppress = false`) keeps its configured mode unchanged.
     for mode in [
         GeminiSearchMode::Grounding,
         GeminiSearchMode::Hybrid,
@@ -76,7 +104,7 @@ fn empty_report_retry_turn_is_sampled_grounding_free() {
         assert_eq!(
             prompt_gemini_search_mode(mode, /*suppress_gemini_grounding*/ false),
             Some(mode),
-            "non-retry turn must keep its configured mode {mode:?}"
+            "non-grace turn must keep its configured mode {mode:?}"
         );
     }
 }

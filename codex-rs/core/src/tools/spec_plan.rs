@@ -48,6 +48,7 @@ use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
+use crate::tools::handlers::multi_agents_v2::CompleteTaskHandler as CompleteTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
@@ -101,7 +102,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
-const GEMINI_MULTI_AGENT_V2_USAGE_HINT: &str = "Gemini subagent guidance: after spawning multiple agents, keep calling `wait_agent` until you have received a final-status notification for every spawned task. Do not produce the final answer after only the first child completes. When the user's task naturally splits into multiple independent parts that can progress at once, spawn one bounded sub-agent per part instead of doing them sequentially — but only when each part is concrete and self-contained and parallelizing them materially shortens completion. Do not delegate trivial, single-step, or tightly-coupled work, or anything you would finish faster locally; just do it yourself. Once children are running, integrate every child's result into one synthesized answer rather than answering from a single child. When you finish a delegated task as a sub-agent, deliver your complete result as your final-channel plain-text message, not via send_message and not by ending on a trailing tool call, because the final message is what the assigning agent receives. Once every spawned child has reported, integrate and STOP — deliver the consolidated answer and start no new work. Treat each child's report as authoritative for the part you delegated; do not re-investigate or independently re-verify a domain you handed to a child.";
+const GEMINI_MULTI_AGENT_V2_USAGE_HINT: &str = "Gemini subagent guidance: after spawning multiple agents, keep calling `wait_agent` until you have received a final-status notification for every spawned task. Do not produce the final answer after only the first child completes. When the user's task naturally splits into multiple independent parts that can progress at once, spawn one bounded sub-agent per part instead of doing them sequentially — but only when each part is concrete and self-contained and parallelizing them materially shortens completion. Do not delegate trivial, single-step, or tightly-coupled work, or anything you would finish faster locally; just do it yourself. Once children are running, integrate every child's result into one synthesized answer rather than answering from a single child. When you finish a delegated task as a sub-agent, finalize by calling `complete_task` with your complete result; do not use send_message or end on a trailing assistant message, because the assigning agent receives the complete_task result. Once every spawned child has reported, integrate and STOP — deliver the consolidated answer and start no new work. Treat each child's report as authoritative for the part you delegated; do not re-investigate or independently re-verify a domain you handed to a child.";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -714,6 +715,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     }
 }
 
+/// O27 Lever 2: the `complete_task` tool is registered ONLY for a GeminiNative spawned child.
+/// The Gemini root orchestrator and every non-Gemini (Responses) agent never see it, so the
+/// OpenAI/Responses tool surface stays byte-identical. Uses the same spawned-child predicate as the
+/// `run_turn` completion override (`is_spawned_subagent`) so registration and override always agree.
+fn gemini_spawned_child(turn_context: &TurnContext) -> bool {
+    turn_context.provider.info().wire_api == WireApi::GeminiNative
+        && matches!(
+            turn_context.session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        )
+}
+
 fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     let turn_context = context.turn_context;
     if collab_tools_enabled(turn_context) {
@@ -805,6 +818,14 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                 exposure,
             ));
+            // O27 Lever 2: Gemini spawned-child-only `complete_task` (explicit completion).
+            // Root orchestrator and Responses never satisfy the gate, so they never see it.
+            if gemini_spawned_child(turn_context) {
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(CompleteTaskHandlerV2, tool_namespace),
+                    exposure,
+                ));
+            }
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);

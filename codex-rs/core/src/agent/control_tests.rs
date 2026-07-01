@@ -15,7 +15,6 @@ use codex_login::CodexAuth;
 use codex_model_provider_info::GEMINI_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
-use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;

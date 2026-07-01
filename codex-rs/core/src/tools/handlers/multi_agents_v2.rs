@@ -29,6 +29,9 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 pub(crate) use close_agent::Handler as CloseAgentHandler;
+pub(crate) use complete_task::CompleteTaskResult;
+pub(crate) use complete_task::CompleteTaskStatus;
+pub(crate) use complete_task::Handler as CompleteTaskHandler;
 pub(crate) use followup_task::Handler as FollowupTaskHandler;
 pub(crate) use list_agents::Handler as ListAgentsHandler;
 pub(crate) use send_message::Handler as SendMessageHandler;
@@ -37,6 +40,7 @@ pub(crate) use spawn::is_root_orchestrator_source;
 pub(crate) use wait::Handler as WaitAgentHandler;
 
 mod close_agent;
+mod complete_task;
 mod followup_task;
 mod list_agents;
 mod message_tool;
