@@ -287,6 +287,14 @@ fn test_amazon_bedrock_provider_adds_mantle_client_agent_header() {
 }
 
 #[test]
+fn test_create_gemini_provider_bounds_stream_idle_timeout() {
+    let provider = ModelProviderInfo::create_gemini_provider();
+
+    assert_eq!(provider.stream_idle_timeout_ms, Some(120_000));
+    assert_eq!(provider.stream_idle_timeout(), Duration::from_secs(120));
+}
+
+#[test]
 fn test_built_in_model_providers_include_amazon_bedrock() {
     let providers = built_in_model_providers(/*openai_base_url*/ None);
 

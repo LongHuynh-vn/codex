@@ -68,16 +68,32 @@ pub async fn stream_generate_content(
     let response =
         send_request_with_retries(&client, &mut auth, provider, &model_info.slug, &request).await?;
 
+    let idle_timeout = provider.stream_idle_timeout();
     let (tx, rx) = mpsc::channel(1600);
     tokio::spawn(async move {
         let mut accumulator =
             response_translator::StreamAccumulator::new(prompt.thought_summary_display);
         let mut events = response.bytes_stream().eventsource();
-        while let Some(event) = events.next().await {
-            let event = match event {
-                Ok(event) => event,
-                Err(err) => {
+        loop {
+            let event = match tokio::time::timeout(idle_timeout, events.next()).await {
+                Ok(Some(Ok(event))) => event,
+                Ok(Some(Err(err))) => {
                     let _ = tx.send(Err(CodexErr::Stream(err.to_string(), None))).await;
+                    return;
+                }
+                // Natural end of stream: fall through to accumulator.finish(), which
+                // emits every buffered item plus the terminal Completed event.
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = tx
+                        .send(Err(CodexErr::Stream(
+                            format!(
+                                "Gemini stream stalled: no SSE event within {}s (idle timeout)",
+                                idle_timeout.as_secs()
+                            ),
+                            None,
+                        )))
+                        .await;
                     return;
                 }
             };
@@ -128,7 +144,17 @@ async fn send_request<T: serde::Serialize + ?Sized>(
     let url = auth.endpoint(provider, model);
     let builder = client.post(url).query(&[("alt", "sse")]);
     let builder = auth.apply_to_request(builder);
-    builder.json(request).send().await.map_err(error::request)
+    let idle_timeout = provider.stream_idle_timeout();
+    match tokio::time::timeout(idle_timeout, builder.json(request).send()).await {
+        Ok(result) => result.map_err(error::request),
+        Err(_) => Err(CodexErr::Stream(
+            format!(
+                "Gemini stream stalled: no response headers within {}s (idle timeout)",
+                idle_timeout.as_secs()
+            ),
+            None,
+        )),
+    }
 }
 
 async fn send_request_with_retries<T: serde::Serialize + ?Sized>(
@@ -154,7 +180,22 @@ async fn send_request_with_retries<T: serde::Serialize + ?Sized>(
 
         let status = response.status();
         let url = auth.endpoint(provider, &active_model);
-        let body = response.text().await.unwrap_or_default();
+        let idle_timeout = provider.stream_idle_timeout();
+        let body = match tokio::time::timeout(idle_timeout, response.text()).await {
+            Ok(result) => result.unwrap_or_default(),
+            // A stalled error body is a transport stall, not a classification signal:
+            // do not fall through to classify_google_rpc_error with an empty body
+            // (that would misread as NoRetry).
+            Err(_) => {
+                return Err(CodexErr::Stream(
+                    format!(
+                        "Gemini stream stalled: error body read timed out after {}s (idle timeout)",
+                        idle_timeout.as_secs()
+                    ),
+                    None,
+                ));
+            }
+        };
         match error::classify_google_rpc_error(status, &body) {
             error::GeminiErrorDecision::RetrySameModel(delay) if same_model_retries < 2 => {
                 same_model_retries += 1;

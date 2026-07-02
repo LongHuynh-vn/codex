@@ -410,7 +410,12 @@ impl ModelProviderInfo {
             env_http_headers: None,
             request_max_retries: None,
             stream_max_retries: None,
-            stream_idle_timeout_ms: None,
+            // Gemini stalls are bounded at 120s of SSE silence (healthy Flash turns
+            // stream near-continuously). Not overridable via [model_providers.gemini] —
+            // built-ins win in merge_configured_model_providers; to tune, define a
+            // custom provider key with wire_api = "gemini_native" and set
+            // stream_idle_timeout_ms there.
+            stream_idle_timeout_ms: Some(120_000),
             websocket_connect_timeout_ms: None,
             requires_openai_auth: false,
             supports_websockets: false,

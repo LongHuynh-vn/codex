@@ -18,6 +18,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -1045,6 +1046,236 @@ fn weather_tool() -> ToolSpec {
         ),
         output_schema: None,
     })
+}
+
+/// Raw TCP SSE mock: wiremock buffers whole response bodies and closes the
+/// connection, so it cannot simulate a stream that stalls mid-body or a server
+/// that never sends headers. These helpers write raw HTTP/1.1 bytes and keep
+/// the socket open (no Content-Length + `connection: close` => body ends at EOF).
+const RAW_SSE_HEADERS: &[u8] =
+    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+async fn drain_http_request(stream: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk).await.expect("read request");
+        if n == 0 {
+            return;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(header_end) = find_subsequence(&buf, b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buf[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            if buf.len() >= header_end + 4 + content_length {
+                return;
+            }
+        }
+    }
+}
+
+fn raw_server_provider(uri: String, idle_timeout_ms: u64) -> ModelProviderInfo {
+    let mut provider = ModelProviderInfo::create_gemini_provider();
+    provider.base_url = Some(uri);
+    provider.env_key = None;
+    provider.experimental_bearer_token = Some("mock-gemini-key".to_string());
+    provider.stream_idle_timeout_ms = Some(idle_timeout_ms);
+    provider
+}
+
+fn flash_model_info() -> codex_protocol::openai_models::ModelInfo {
+    model_config::gemini_model_catalog()
+        .models
+        .into_iter()
+        .find(|model| model.slug == GEMINI_3_5_FLASH_MODEL)
+        .expect("gemini flash model")
+}
+
+fn simple_prompt() -> GeminiPrompt {
+    GeminiPrompt {
+        instructions: "Reply done.".to_string(),
+        input: vec![user_message("Reply done.")],
+        tools: Vec::new(),
+        output_schema: None,
+        gemini_search_mode: None,
+        tool_choice: GeminiToolChoice::Auto,
+        thought_summary_display: GeminiThoughtSummaryDisplay::Hidden,
+    }
+}
+
+#[tokio::test]
+async fn stalled_stream_times_out_with_idle_error() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let uri = format!("http://{}", listener.local_addr().expect("local addr"));
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        drain_http_request(&mut stream).await;
+        stream.write_all(RAW_SSE_HEADERS).await.expect("headers");
+        stream
+            .write_all(
+                b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"partial\"}]}}]}\n\n",
+            )
+            .await
+            .expect("event");
+        stream.flush().await.expect("flush");
+        // Hold the socket open without further events so the stream stalls.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let provider = raw_server_provider(uri, 250);
+    let mut rx = stream_generate_content(
+        reqwest::Client::new(),
+        &provider,
+        &flash_model_info(),
+        simple_prompt(),
+        Some(ReasoningEffort::Low),
+    )
+    .await
+    .expect("stream should start");
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("watchdog should fire before the test deadline")
+        .expect("channel should yield the watchdog error");
+    match event {
+        Err(CodexErr::Stream(message, delay)) => {
+            assert!(message.contains("Gemini stream stalled"), "{message}");
+            assert!(message.contains("no SSE event"), "{message}");
+            assert_eq!(delay, None);
+        }
+        Err(other) => panic!("expected idle-timeout stream error, got {other:?}"),
+        Ok(_) => panic!("expected idle-timeout stream error, got a response event"),
+    }
+    assert!(
+        rx.recv().await.is_none(),
+        "channel should close after the watchdog error"
+    );
+}
+
+#[tokio::test]
+async fn unresponsive_server_times_out_before_headers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let uri = format!("http://{}", listener.local_addr().expect("local addr"));
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        drain_http_request(&mut stream).await;
+        // Never write a response; hold the socket open.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let provider = raw_server_provider(uri, 250);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream_generate_content(
+            reqwest::Client::new(),
+            &provider,
+            &flash_model_info(),
+            simple_prompt(),
+            Some(ReasoningEffort::Low),
+        ),
+    )
+    .await
+    .expect("pre-stream watchdog should fire before the test deadline");
+    match result {
+        Err(CodexErr::Stream(message, delay)) => {
+            assert!(message.contains("Gemini stream stalled"), "{message}");
+            assert!(message.contains("no response headers"), "{message}");
+            assert_eq!(delay, None);
+        }
+        Err(other) => panic!("expected pre-stream idle timeout, got {other:?}"),
+        Ok(_) => panic!("expected pre-stream idle timeout, got a stream"),
+    }
+}
+
+#[tokio::test]
+async fn slow_steady_stream_completes_without_timeout() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let uri = format!("http://{}", listener.local_addr().expect("local addr"));
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        drain_http_request(&mut stream).await;
+        stream.write_all(RAW_SSE_HEADERS).await.expect("headers");
+        // Eight events spaced under the idle timeout but summing well past it:
+        // a watchdog that fails to reset per event would fire mid-stream.
+        for index in 0..8 {
+            let chunk = format!(
+                "data: {{\"candidates\":[{{\"content\":{{\"role\":\"model\",\"parts\":[{{\"text\":\"chunk-{index} \"}}]}}}}]}}\n\n"
+            );
+            stream.write_all(chunk.as_bytes()).await.expect("event");
+            stream.flush().await.expect("flush");
+            tokio::time::sleep(Duration::from_millis(75)).await;
+        }
+        // Natural EOF without [DONE] or finishReason: the reader must break (not
+        // return) so accumulator.finish() still emits the Message + Completed.
+    });
+
+    let provider = raw_server_provider(uri, 500);
+    let mut rx = stream_generate_content(
+        reqwest::Client::new(),
+        &provider,
+        &flash_model_info(),
+        simple_prompt(),
+        Some(ReasoningEffort::Low),
+    )
+    .await
+    .expect("stream should start");
+
+    let mut message_text = None;
+    let mut completed = false;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("stream should end before the test deadline")
+    {
+        match event.expect("slow steady stream must not yield errors") {
+            ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) => {
+                let text = content
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        ContentItem::OutputText { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                message_text = Some(text);
+            }
+            ResponseEvent::Completed { .. } => {
+                completed = true;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        message_text.as_deref(),
+        Some("chunk-0 chunk-1 chunk-2 chunk-3 chunk-4 chunk-5 chunk-6 chunk-7 ")
+    );
+    assert!(
+        completed,
+        "natural EOF must still emit Completed via accumulator.finish()"
+    );
 }
 
 fn complex_schema_tool() -> ToolSpec {
