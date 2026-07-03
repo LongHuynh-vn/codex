@@ -69,6 +69,7 @@ async fn handle_spawn_agent(
     // never auto-complete the orchestration goal (set on invocation, before any
     // early return, so an errored spawn still counts — conservatively safe).
     session.mark_reengaged_child_this_turn(turn.as_ref()).await;
+    session.mark_orchestration_reengaged(turn.as_ref()).await;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let is_gemini_native = turn.provider.info().wire_api == WireApi::GeminiNative;
@@ -235,6 +236,9 @@ async fn handle_spawn_agent(
     let _ = result?;
     if is_gemini_native {
         maybe_auto_arm_gemini_orchestration_goal(&session, turn.as_ref()).await;
+        session
+            .mark_orchestration_started_if_first(turn.as_ref())
+            .await;
     }
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(

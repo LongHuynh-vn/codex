@@ -42,6 +42,7 @@ use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::BaseInstructions;
@@ -6870,4 +6871,546 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .set_permission_profile(turn.permission_profile())
         .expect("permission profile set");
     assert_eq!(config, expected);
+}
+
+// --- O31: goal-free orchestration idle nudge (Change 1) --------------------
+//
+// Mirrors the `auto_goal_spawn_setup` / G0-G7 test harness above, but leaves
+// `Feature::Goals` disabled so a real Gemini-native root `spawn_agent` call
+// exercises O31's goal-free path (auto-arm cleanly no-ops per
+// `maybe_auto_arm_gemini_orchestration_goal`'s `get_thread_goal` bail on a
+// disabled feature; `Session::orchestration_dormant()` stays false) instead of
+// the goal machinery.
+
+async fn orchestration_spawn_setup<F>(
+    provider: AutoGoalProvider,
+    session_source: F,
+) -> AutoGoalSpawnSetup
+where
+    F: FnOnce(ThreadId) -> SessionSource,
+{
+    let (_session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    for feature in [Feature::MultiAgentV2, Feature::Sqlite] {
+        config
+            .features
+            .enable(feature)
+            .expect("test config should allow feature update");
+    }
+    // `Feature::Goals` is stable and default-enabled, so it must be disabled
+    // explicitly (not merely left unmentioned) for this setup to exercise the
+    // goal-free O31 path instead of the real auto-arm.
+    config
+        .features
+        .disable(Feature::Goals)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    match provider {
+        AutoGoalProvider::Gemini => use_gemini_provider(&mut turn),
+        AutoGoalProvider::Bedrock => use_bedrock_provider(&mut turn),
+    }
+    let config = (*turn.config).clone();
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state db should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let root = manager
+        .start_thread(config)
+        .await
+        .expect("root thread should start");
+
+    let session = root.thread.codex.session.clone();
+    let mut turn = session.new_default_turn().await;
+    Arc::get_mut(&mut turn)
+        .expect("fresh turn should be unique")
+        .session_source = session_source(root.thread_id);
+
+    AutoGoalSpawnSetup {
+        manager,
+        session,
+        turn,
+        state_db,
+    }
+}
+
+/// Spawns one real child ("worker") through the actual `handle_spawn_agent`
+/// path (exercising O31's `mark_orchestration_started_if_first` wiring at the
+/// real call site), then returns its `ThreadId`.
+async fn spawn_started_worker(setup: &AutoGoalSpawnSetup) -> ThreadId {
+    spawn_agent_v2_for_auto_goal(setup, "worker").await;
+    only_child_of(setup).await
+}
+
+async fn spawn_started_workers(setup: &AutoGoalSpawnSetup, task_names: &[&str]) -> Vec<ThreadId> {
+    for task_name in task_names {
+        spawn_agent_v2_for_auto_goal(setup, task_name).await;
+    }
+    let children = setup
+        .session
+        .services
+        .agent_control
+        .open_thread_spawn_children(setup.session.thread_id)
+        .await
+        .expect("children should enumerate");
+    assert_eq!(children.len(), task_names.len());
+    children
+        .into_iter()
+        .map(|(child_thread_id, _metadata)| child_thread_id)
+        .collect()
+}
+
+async fn only_child_of(setup: &AutoGoalSpawnSetup) -> ThreadId {
+    setup
+        .session
+        .services
+        .agent_control
+        .open_thread_spawn_children(setup.session.thread_id)
+        .await
+        .expect("children should enumerate")
+        .into_iter()
+        .next()
+        .expect("expected exactly one child")
+        .0
+}
+
+async fn orchestration_nudge_fired(setup: &AutoGoalSpawnSetup) -> bool {
+    setup
+        .session
+        .orchestration_runtime
+        .inner
+        .lock()
+        .await
+        .nudge_fired
+}
+
+#[tokio::test]
+async fn orchestration_nudge_fires_when_children_delivered_without_answer() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    assert!(
+        setup
+            .session
+            .orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .started,
+        "the real spawn_agent call should have captured the O31 baseline"
+    );
+    assert!(setup.session.active_turn.lock().await.is_none());
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ false,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+
+    assert!(orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_some());
+
+    setup
+        .session
+        .abort_all_tasks(TurnAbortReason::Interrupted)
+        .await;
+}
+
+#[tokio::test]
+async fn orchestration_nudge_fires_when_spawn_and_delivery_share_the_turn() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_ids = spawn_started_workers(&setup, &["worker_a", "worker_b", "worker_c"]).await;
+    for child_id in child_ids {
+        complete_worker_turn(&setup.manager, child_id, "child result").await;
+    }
+    assert!(
+        setup
+            .session
+            .orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .started,
+        "the real spawn_agent calls should have captured the O31 baseline"
+    );
+    assert!(setup.session.active_turn.lock().await.is_none());
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ false,
+            /*reengaged_child_this_turn*/ true,
+        )
+        .await;
+
+    assert!(orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_some());
+
+    setup
+        .session
+        .abort_all_tasks(TurnAbortReason::Interrupted)
+        .await;
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_when_shared_turn_emits_answer() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_ids = spawn_started_workers(&setup, &["worker_a", "worker_b", "worker_c"]).await;
+    for child_id in child_ids {
+        complete_worker_turn(&setup.manager, child_id, "child result").await;
+    }
+    assert!(setup.session.active_turn.lock().await.is_none());
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            /*reengaged_child_this_turn*/ true,
+        )
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+    assert!(
+        setup
+            .session
+            .orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .answer_emitted_since_reengagement,
+        "the final-answer marker should be set even on a spawn/delivery turn"
+    );
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ false,
+            /*reengaged_child_this_turn*/ false,
+        )
+        .await;
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_when_goal_active() {
+    let setup = auto_goal_spawn_setup(
+        AutoGoalProvider::Gemini,
+        |_| SessionSource::Exec,
+        Some("Review all worker results"),
+    )
+    .await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    let marker = setup
+        .session
+        .goal_runtime
+        .auto_armed_orchestration_goal_id
+        .lock()
+        .await
+        .clone();
+    assert!(
+        marker.is_some(),
+        "this setup should exercise the real auto-arm path"
+    );
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_on_non_gemini() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Bedrock, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    assert!(
+        !setup
+            .session
+            .orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .started,
+        "a non-Gemini spawn must never capture the O31 baseline"
+    );
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_on_non_root_source() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| {
+        SessionSource::Internal(InternalSessionSource::MemoryConsolidation)
+    })
+    .await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    assert!(
+        !setup
+            .session
+            .orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .started,
+        "a non-root source spawn must never capture the O31 baseline"
+    );
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_when_never_started() {
+    // The vacuous trap: a root that never spawned has `open_thread_spawn_children`
+    // return `Ok(vec![])`, which would otherwise look "all delivered." `started`
+    // (false here) must be the guard, independent of the empty child list.
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_while_child_running() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    // A `Completed(None)` (null report) child is indeterminate, not delivered.
+    complete_worker_turn_without_report(&setup.manager, child_id).await;
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_with_mailbox_pending() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    setup
+        .session
+        .input_queue
+        .enqueue_mailbox_communication(InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::root(),
+            Vec::new(),
+            "an uncollected child update".to_string(),
+            /*trigger_turn*/ true,
+        ))
+        .await;
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_when_already_fired() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    setup
+        .session
+        .orchestration_runtime
+        .inner
+        .lock()
+        .await
+        .nudge_fired = true;
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_in_plan_mode() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+    let mut turn = setup.session.new_default_turn().await;
+    Arc::get_mut(&mut turn)
+        .expect("fresh turn should be unique")
+        .collaboration_mode
+        .mode = ModeKind::Plan;
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(turn.as_ref(), false, false)
+        .await;
+
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_nudge_suppressed_and_marker_set_when_answer_already_emitted() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+
+    // A clean synthesis turn: answer emitted, no re-engagement.
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(
+            setup.turn.as_ref(),
+            /*emitted_final_answer*/ true,
+            false,
+        )
+        .await;
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+    assert!(
+        setup
+            .session
+            .orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .answer_emitted_since_reengagement,
+        "an emitted answer should durably mark this epoch as answered"
+    );
+
+    // A later idle turn-end with no new answer stays suppressed: the durable
+    // marker persists until the next re-engagement.
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+    assert!(!orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_reengagement_clears_answer_marker_and_rearms_nudge() {
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    let child_id = spawn_started_worker(&setup).await;
+    complete_worker_turn(&setup.manager, child_id, "child result").await;
+
+    // Epoch 1: answered, nudge suppressed.
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), true, false)
+        .await;
+    assert!(!orchestration_nudge_fired(&setup).await);
+
+    // Re-engagement (a follow-up spawn/send_message) clears the durable
+    // answer marker and re-arms the nudge latch.
+    setup
+        .session
+        .mark_orchestration_reengaged(setup.turn.as_ref())
+        .await;
+    assert!(
+        !setup
+            .session
+            .orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .answer_emitted_since_reengagement
+    );
+    assert!(!orchestration_nudge_fired(&setup).await);
+
+    // Epoch 2: same delivered child, still no new answer -> nudge fires once more.
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+    assert!(orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_some());
+
+    setup
+        .session
+        .abort_all_tasks(TurnAbortReason::Interrupted)
+        .await;
+}
+
+#[tokio::test]
+async fn orchestration_nudge_fires_when_started_children_later_closed() {
+    // G7's own semantics: an empty child list is vacuously delivered (e.g.
+    // all children explicitly closed), not "insufficient evidence." `started`
+    // already distinguishes this from the never-spawned vacuous trap, so a
+    // closed-children orchestration must still nudge, not silently stall.
+    let setup = orchestration_spawn_setup(AutoGoalProvider::Gemini, |_| SessionSource::Exec).await;
+    spawn_started_worker(&setup).await;
+
+    let output = CloseAgentHandlerV2
+        .handle(invocation(
+            setup.session.clone(),
+            setup.turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
+        .await
+        .expect("close_agent should succeed");
+    let (_content, success) = expect_text_output(output);
+    assert_eq!(success, Some(true));
+    let children = setup
+        .session
+        .services
+        .agent_control
+        .open_thread_spawn_children(setup.session.thread_id)
+        .await
+        .expect("children should enumerate");
+    assert!(
+        children.is_empty(),
+        "the closed child should no longer be live"
+    );
+
+    setup
+        .session
+        .maybe_nudge_gemini_orchestration_idle(setup.turn.as_ref(), false, false)
+        .await;
+
+    assert!(orchestration_nudge_fired(&setup).await);
+    assert!(setup.session.active_turn.lock().await.is_some());
+
+    setup
+        .session
+        .abort_all_tasks(TurnAbortReason::Interrupted)
+        .await;
 }

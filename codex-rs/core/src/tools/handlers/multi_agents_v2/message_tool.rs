@@ -78,6 +78,7 @@ pub(crate) async fn handle_message_string_tool(
     // errored message still counts — conservatively safe for the anti-stall
     // backstop.
     session.mark_reengaged_child_this_turn(turn.as_ref()).await;
+    session.mark_orchestration_reengaged(turn.as_ref()).await;
     let receiver_thread_id = resolve_agent_target(&session, &turn, &target).await?;
     let receiver_agent = session
         .services

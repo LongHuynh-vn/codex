@@ -4915,6 +4915,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         goal_runtime: crate::goals::GoalRuntimeState::new(),
+        orchestration_runtime: crate::orchestration::OrchestrationRuntimeState::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
@@ -7009,6 +7010,7 @@ where
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         goal_runtime: crate::goals::GoalRuntimeState::new(),
+        orchestration_runtime: crate::orchestration::OrchestrationRuntimeState::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
@@ -9524,6 +9526,404 @@ async fn budget_limited_accounting_steers_active_turn_without_aborting() -> anyh
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 
     Ok(())
+}
+
+// --- O31: goal-free orchestration token ceiling (Change 2) -----------------
+//
+// Mirrors `budget_limited_accounting_steers_active_turn_without_aborting`
+// above, but on a Gemini-native root session with `Feature::Goals` disabled,
+// so `Session::maybe_steer_gemini_orchestration_ceiling` is exercised
+// directly instead of the goal budget-accounting path.
+
+async fn make_orchestration_session_and_context_with_rx() -> (
+    Arc<Session>,
+    Arc<TurnContext>,
+    async_channel::Receiver<Event>,
+    tempfile::TempDir,
+) {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let (session, turn_context, rx) = make_session_and_context_with_auth_config_home_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        codex_home.path(),
+        |config| {
+            // `Feature::Goals` is stable and default-enabled, so it must be
+            // disabled explicitly for this session to exercise the goal-free
+            // O31 path instead of the real goal machinery.
+            config
+                .features
+                .disable(Feature::Goals)
+                .expect("goal feature should be disableable in tests");
+            let mut provider_info = ModelProviderInfo::create_gemini_provider();
+            provider_info.experimental_bearer_token = Some("test-gemini-key".to_string());
+            config.model_provider_id = codex_model_provider_info::GEMINI_PROVIDER_ID.to_string();
+            config.model_provider = provider_info;
+        },
+    )
+    .await;
+    (session, turn_context, rx, codex_home)
+}
+
+async fn mark_orchestration_started_for_test(sess: &Session, baseline: TokenUsage) {
+    let mut inner = sess.orchestration_runtime.inner.lock().await;
+    inner.started = true;
+    inner.token_baseline = Some(baseline);
+}
+
+async fn spawn_never_ending_turn(sess: &Arc<Session>, tc: &Arc<TurnContext>) {
+    sess.spawn_task(
+        Arc::clone(tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn orchestration_ceiling_steers_active_turn_at_first_multiple() -> anyhow::Result<()> {
+    let (sess, tc, rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
+    mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;
+    spawn_never_ending_turn(&sess, &tc).await;
+    while rx.try_recv().is_ok() {}
+
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 200_000,
+            cached_input_tokens: 0,
+            output_tokens: 60_000,
+            reasoning_output_tokens: 0,
+            total_tokens: 260_000,
+        },
+    )
+    .await;
+
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+
+    let pending_input = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+    let [TurnInput::ResponseItem(ResponseItem::Message { role, content, .. })] =
+        pending_input.as_slice()
+    else {
+        panic!("expected one ceiling steering message, got {pending_input:#?}");
+    };
+    assert_eq!("user", role);
+    let [ContentItem::InputText { text }] = content.as_slice() else {
+        panic!("expected one text span in ceiling steering message, got {content:#?}");
+    };
+    assert!(text.starts_with("<codex_internal_context source=\"orchestration\">"));
+    assert!(text.trim_end().ends_with("</codex_internal_context>"));
+    assert!(text.to_lowercase().contains("token budget"));
+    assert_eq!(
+        1,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    assert!(sess.active_turn.lock().await.is_some());
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event.msg, EventMsg::TurnAborted(_)),
+            "the ceiling should steer the active turn instead of aborting it"
+        );
+    }
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn orchestration_ceiling_refires_at_next_multiple_but_not_within_one() -> anyhow::Result<()> {
+    let (sess, tc, rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
+    mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;
+    spawn_never_ending_turn(&sess, &tc).await;
+    while rx.try_recv().is_ok() {}
+
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 200_000,
+            output_tokens: 60_000,
+            total_tokens: 260_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+    assert_eq!(
+        1,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    // Drain the first steer message so the assertions below observe only
+    // what each subsequent call newly injects.
+    let _ = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+
+    // Still within the first 250K-500K band: must not re-fire.
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 220_000,
+            output_tokens: 70_000,
+            total_tokens: 290_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+    assert_eq!(
+        1,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    let pending = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+    assert!(
+        pending.is_empty(),
+        "must not re-fire within the same ceiling multiple"
+    );
+
+    // Crosses the second 250K increment (>= 500K): fires again.
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 400_000,
+            output_tokens: 120_000,
+            total_tokens: 520_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+    assert_eq!(
+        2,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    let pending = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+    assert_eq!(1, pending.len(), "expected exactly one new steer message");
+    while let Ok(event) = rx.try_recv() {
+        assert!(!matches!(event.msg, EventMsg::TurnAborted(_)));
+    }
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn orchestration_ceiling_does_not_advance_watermark_when_injection_fails() {
+    let (sess, tc, _rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
+    mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;
+    // No task spawned: `active_turn` stays `None`, so `inject_if_running` returns `Err`.
+    assert!(sess.active_turn.lock().await.is_none());
+
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 200_000,
+            output_tokens: 60_000,
+            total_tokens: 260_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+
+    assert_eq!(
+        0,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired,
+        "a failed injection must not advance the watermark, so a later tool completion retries"
+    );
+}
+
+#[tokio::test]
+async fn orchestration_ceiling_inert_when_goal_active() {
+    let (sess, tc, _rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
+    mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;
+    // Directly mark the auto-armed provenance the dormancy check reads
+    // (`Session::orchestration_dormant`), since this lightweight harness has
+    // no state db to run the real spawn_agent auto-arm through.
+    *sess
+        .goal_runtime
+        .auto_armed_orchestration_goal_id
+        .lock()
+        .await = Some("test-goal-id".to_string());
+    spawn_never_ending_turn(&sess, &tc).await;
+
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 200_000,
+            output_tokens: 60_000,
+            total_tokens: 260_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+
+    assert_eq!(
+        0,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    let pending = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+    assert!(pending.is_empty());
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn orchestration_ceiling_inert_below_threshold() {
+    let (sess, tc, _rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
+    mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;
+    spawn_never_ending_turn(&sess, &tc).await;
+
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 100_000,
+            output_tokens: 40_000,
+            total_tokens: 140_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+
+    assert_eq!(
+        0,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    let pending = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+    assert!(pending.is_empty());
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn orchestration_ceiling_inert_when_not_started() {
+    let (sess, tc, _rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
+    // `mark_orchestration_started_for_test` intentionally not called.
+    spawn_never_ending_turn(&sess, &tc).await;
+
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 400_000,
+            output_tokens: 120_000,
+            total_tokens: 520_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
+        .await;
+
+    assert_eq!(
+        0,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    let pending = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+    assert!(pending.is_empty());
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn orchestration_ceiling_inert_in_plan_mode() {
+    let (sess, tc, _rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
+    mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;
+    spawn_never_ending_turn(&sess, &tc).await;
+    let mut plan_turn = sess.new_default_turn().await;
+    Arc::get_mut(&mut plan_turn)
+        .expect("fresh turn should be unique")
+        .collaboration_mode
+        .mode = ModeKind::Plan;
+
+    set_total_token_usage(
+        &sess,
+        TokenUsage {
+            input_tokens: 400_000,
+            output_tokens: 120_000,
+            total_tokens: 520_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    sess.maybe_steer_gemini_orchestration_ceiling(plan_turn.as_ref())
+        .await;
+
+    assert_eq!(
+        0,
+        sess.orchestration_runtime
+            .inner
+            .lock()
+            .await
+            .steer_multiples_fired
+    );
+    let pending = sess
+        .input_queue
+        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
+        .await;
+    assert!(pending.is_empty());
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

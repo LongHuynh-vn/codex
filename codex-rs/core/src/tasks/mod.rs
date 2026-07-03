@@ -313,12 +313,24 @@ impl Session {
         self.start_task(turn_context, input, task).await;
     }
 
-    pub(crate) async fn start_task<T: SessionTask>(
+    // Returns an explicit `BoxFuture` rather than relying on the implicit
+    // `impl Future` an `async fn` would produce. This function's own spawned
+    // continuation (below) can, via `on_task_finished`, reach back into this
+    // same function (e.g. through the goal-free orchestration idle nudge,
+    // `Session::maybe_nudge_gemini_orchestration_idle` -> `try_start_turn_if_idle`
+    // -> `start_task`). That mutually-recursive call graph between two
+    // opaque-type-registering async fns defined in the same scope is not
+    // something rustc's opaque-type inference can resolve ("fetching the
+    // hidden types of an opaque inside of the defining scope is not
+    // supported"); boxing this one explicitly breaks the cycle. Call sites
+    // are unaffected since `BoxFuture` is itself `Future` and stays awaitable.
+    pub(crate) fn start_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
-    ) {
+    ) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();
@@ -445,6 +457,7 @@ impl Session {
             _timer: timer,
         };
         turn.task = Some(running_task);
+        })
     }
 
     /// Starts a regular turn when the session is idle and pending work is waiting.
@@ -809,6 +822,15 @@ impl Session {
         // before MaybeContinueIfIdle so completing the goal makes the
         // continuation candidate short-circuit on `status != Active`.
         self.maybe_auto_complete_gemini_orchestration_goal(
+            turn_context.as_ref(),
+            emitted_final_answer,
+            reengaged_child_this_turn,
+        )
+        .await;
+        // Goal-free structural nudge (O31): dormant whenever the goal above is
+        // armed for this session; covers the same "all children delivered,
+        // idle forever" failure when it isn't.
+        self.maybe_nudge_gemini_orchestration_idle(
             turn_context.as_ref(),
             emitted_final_answer,
             reengaged_child_this_turn,

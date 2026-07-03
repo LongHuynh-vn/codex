@@ -667,6 +667,15 @@ impl ToolRegistry {
         {
             warn!("failed to account thread goal progress after tool call: {err}");
         }
+        // Goal-free structural ceiling (O31): dormant whenever the goal above
+        // is armed for this session; covers the same runaway-token failure
+        // when it isn't.
+        if finished {
+            invocation
+                .session
+                .maybe_steer_gemini_orchestration_ceiling(invocation.turn.as_ref())
+                .await;
+        }
 
         match result {
             Ok(_) => {
