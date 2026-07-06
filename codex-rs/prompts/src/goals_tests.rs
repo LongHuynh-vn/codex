@@ -30,48 +30,6 @@ fn continuation_prompt_allows_complete_and_strict_blocked_updates() {
 }
 
 #[test]
-fn orchestration_continuation_prompt_inverts_solo_redo_pressure() {
-    let goal = ThreadGoal {
-        thread_id: ThreadId::new(),
-        objective: "coordinate the workers".to_string(),
-        status: ThreadGoalStatus::Active,
-        token_budget: Some(250_000),
-        tokens_used: 1_234,
-        time_used_seconds: 56,
-        created_at: 1,
-        updated_at: 2,
-    };
-    let prompt = orchestration_continuation_prompt(&goal).replace("\r\n", "\n");
-
-    // Standard rendering parity with the solo continuation prompt.
-    assert!(prompt.contains("coordinate the workers"));
-    assert!(prompt.contains("<objective>\ncoordinate the workers\n</objective>"));
-    assert!(prompt.contains("Token budget: 250000"));
-    // It still offers the complete exit so a done orchestrator can self-close.
-    assert!(prompt.contains("call `update_goal` with status \"complete\""));
-
-    // The load-bearing inversion: treat children as authoritative; stop; do not
-    // re-investigate/re-search/re-plan delegated work.
-    assert!(prompt.contains("authoritative for the part you delegated"));
-    assert!(prompt.contains("Do NOT re-investigate"));
-
-    // O27: chase a child that delivered no usable report before finalizing, and
-    // surface an errored/failed child by name rather than dropping its section.
-    assert!(prompt.contains("re-engage that specific child with `followup_task`"));
-    assert!(prompt.contains("naming the sub-agent"));
-    assert!(prompt.contains("Never omit a failed section silently."));
-
-    // It must NOT carry the solo-worker prompt's redo/re-verify pressure that is
-    // the confirmed root cause of over-management.
-    let solo = continuation_prompt(&goal);
-    assert!(solo.contains("treat completion as unproven"));
-    assert!(!prompt.contains("treat completion as unproven"));
-    assert!(solo.contains("Improve, replace, or remove existing work"));
-    assert!(!prompt.contains("Improve, replace, or remove existing work"));
-    assert_ne!(prompt, solo);
-}
-
-#[test]
 fn budget_limit_prompt_steers_model_to_wrap_up_without_pausing() {
     let prompt = budget_limit_prompt(&ThreadGoal {
         thread_id: ThreadId::new(),

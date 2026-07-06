@@ -9770,50 +9770,6 @@ async fn orchestration_ceiling_does_not_advance_watermark_when_injection_fails()
 }
 
 #[tokio::test]
-async fn orchestration_ceiling_inert_when_goal_active() {
-    let (sess, tc, _rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
-    mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;
-    // Directly mark the auto-armed provenance the dormancy check reads
-    // (`Session::orchestration_dormant`), since this lightweight harness has
-    // no state db to run the real spawn_agent auto-arm through.
-    *sess
-        .goal_runtime
-        .auto_armed_orchestration_goal_id
-        .lock()
-        .await = Some("test-goal-id".to_string());
-    spawn_never_ending_turn(&sess, &tc).await;
-
-    set_total_token_usage(
-        &sess,
-        TokenUsage {
-            input_tokens: 200_000,
-            output_tokens: 60_000,
-            total_tokens: 260_000,
-            ..Default::default()
-        },
-    )
-    .await;
-    sess.maybe_steer_gemini_orchestration_ceiling(tc.as_ref())
-        .await;
-
-    assert_eq!(
-        0,
-        sess.orchestration_runtime
-            .inner
-            .lock()
-            .await
-            .steer_multiples_fired
-    );
-    let pending = sess
-        .input_queue
-        .get_pending_input(&sess.active_turn, WireApi::GeminiNative)
-        .await;
-    assert!(pending.is_empty());
-
-    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
-}
-
-#[tokio::test]
 async fn orchestration_ceiling_inert_below_threshold() {
     let (sess, tc, _rx, _codex_home) = make_orchestration_session_and_context_with_rx().await;
     mark_orchestration_started_for_test(sess.as_ref(), TokenUsage::default()).await;

@@ -26,33 +26,3 @@ pub(crate) fn is_final(status: &AgentStatus) -> bool {
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
     )
 }
-
-/// Stricter than [`is_final`]: a child counts as "done with a delivered result"
-/// for orchestration auto-completion only when it reached a genuinely terminal,
-/// settled state that carried something the orchestrator can synthesize from — a
-/// report (`Completed(Some(..))`) or a determinate error/shutdown verdict.
-///
-/// Unlike `is_final`, this treats `NotFound` as **not** done so a transiently-
-/// unregistered or mid-spawn child is never mistaken for a finished one; the
-/// non-terminal not-done set is `{NotFound, PendingInit, Running, Interrupted}`
-/// (a child running its child-side complete_task grace turn is `Running`, so it
-/// is never counted as done while a report could still arrive).
-///
-/// `Completed(None)` is also **not** done: it is the one *indeterminate* terminal
-/// outcome, delivering no report. Keeping it not-done leaves the orchestration
-/// goal Active so the parent chases a real report instead of finalizing with a
-/// missing section. `Errored` IS delivered:
-/// an error is a determinate terminal verdict, and re-engaging a
-/// persistently-errored child is the re-engagement spin O27 exists to remove —
-/// the orchestrator must surface the error in its synthesis instead.
-///
-/// `Shutdown` is matched for safety/future-proofing, but is currently
-/// unreachable as an *observed* status: shutting a child down removes it from
-/// `open_thread_spawn_children`, so shut-down children are handled by the
-/// empty-list (vacuously-done) case at the call site instead.
-pub(crate) fn is_terminal_with_delivery(status: &AgentStatus) -> bool {
-    matches!(
-        status,
-        AgentStatus::Completed(Some(_)) | AgentStatus::Errored(_) | AgentStatus::Shutdown
-    )
-}

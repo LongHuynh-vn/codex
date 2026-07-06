@@ -14,7 +14,6 @@ pub use compact::SUMMARY_PREFIX;
 pub use goals::budget_limit_prompt;
 pub use goals::continuation_prompt;
 pub use goals::objective_updated_prompt;
-pub use goals::orchestration_continuation_prompt;
 pub use permissions_instructions::PermissionsInstructions;
 pub use realtime::BACKEND_PROMPT;
 pub use realtime::END_INSTRUCTIONS;
