@@ -124,7 +124,8 @@ impl HistoryCell for McpToolCallCell {
             Some(true) => "•".green().bold(),
             Some(false) => "•".red().bold(),
             None => activity_indicator(
-                Some(self.start_time),
+                self.start_time.elapsed(),
+                /*stall_intensity*/ 0.0,
                 MotionMode::from_animations_enabled(self.animations_enabled),
                 ReducedMotionIndicator::StaticBullet,
             )
@@ -641,7 +642,8 @@ impl HistoryCell for McpInventoryLoadingCell {
         vec![
             vec![
                 activity_indicator(
-                    Some(self.start_time),
+                    self.start_time.elapsed(),
+                    /*stall_intensity*/ 0.0,
                     MotionMode::from_animations_enabled(self.animations_enabled),
                     ReducedMotionIndicator::StaticBullet,
                 )

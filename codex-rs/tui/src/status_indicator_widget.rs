@@ -26,6 +26,7 @@ use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
 use crate::motion::shimmer_text;
+use crate::motion::stall_intensity;
 use crate::render::renderable::Renderable;
 use crate::text_formatting::capitalize_first;
 use crate::tui::FrameRequester;
@@ -55,6 +56,8 @@ pub(crate) struct StatusIndicatorWidget {
     elapsed_running: Duration,
     last_resume_at: Instant,
     is_paused: bool,
+    tools_active: bool,
+    stall_armed_at: Option<Instant>,
     app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
     animations_enabled: bool,
@@ -93,6 +96,8 @@ impl StatusIndicatorWidget {
             elapsed_running: Duration::ZERO,
             last_resume_at: Instant::now(),
             is_paused: false,
+            tools_active: false,
+            stall_armed_at: None,
 
             app_event_tx,
             frame_requester,
@@ -150,12 +155,26 @@ impl StatusIndicatorWidget {
         self.details.as_deref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn freeze_timer_for_test(&mut self) {
+        self.is_paused = true;
+        self.elapsed_running = Duration::ZERO;
+    }
+
     pub(crate) fn set_interrupt_hint_visible(&mut self, visible: bool) {
         self.show_interrupt_hint = visible;
     }
 
     pub(crate) fn set_interrupt_binding(&mut self, binding: Option<KeyBinding>) {
         self.interrupt_binding = binding;
+    }
+
+    pub(crate) fn set_tools_active(&mut self, active: bool) {
+        self.tools_active = active;
+    }
+
+    pub(crate) fn set_stall_armed_at(&mut self, armed_at: Option<Instant>) {
+        self.stall_armed_at = armed_at;
     }
 
     pub(crate) fn pause_timer(&mut self) {
@@ -197,6 +216,17 @@ impl StatusIndicatorWidget {
 
     pub fn elapsed_seconds(&self) -> u64 {
         self.elapsed_seconds_at(Instant::now())
+    }
+
+    fn stall_intensity_at(&self, now: Instant, motion_mode: MotionMode) -> f32 {
+        if self.is_paused || self.tools_active {
+            return 0.0;
+        }
+
+        match self.stall_armed_at {
+            Some(armed_at) => stall_intensity(now.saturating_duration_since(armed_at), motion_mode),
+            None => 0.0,
+        }
     }
 
     /// Wrap the details text into a fixed width and return the lines, truncating if necessary.
@@ -251,10 +281,12 @@ impl Renderable for StatusIndicatorWidget {
         let elapsed_duration = self.elapsed_duration_at(now);
         let pretty_elapsed = fmt_elapsed_compact(elapsed_duration.as_secs());
         let motion_mode = MotionMode::from_animations_enabled(self.animations_enabled);
+        let stall_intensity = self.stall_intensity_at(now, motion_mode);
 
         let mut spans = Vec::with_capacity(5);
         if let Some(indicator) = activity_indicator(
-            Some(self.last_resume_at),
+            elapsed_duration,
+            stall_intensity,
             motion_mode,
             ReducedMotionIndicator::Hidden,
         ) {
@@ -330,11 +362,12 @@ mod tests {
     fn renders_with_working_header() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let w = StatusIndicatorWidget::new(
+        let mut w = StatusIndicatorWidget::new(
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
         );
+        w.freeze_timer_for_test();
 
         // Render into a fixed-size test terminal and snapshot the backend.
         let mut terminal = Terminal::new(TestBackend::new(80, 2)).expect("terminal");
@@ -348,11 +381,12 @@ mod tests {
     fn renders_truncated() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let w = StatusIndicatorWidget::new(
+        let mut w = StatusIndicatorWidget::new(
             tx,
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
         );
+        w.freeze_timer_for_test();
 
         // Render into a fixed-size test terminal and snapshot the backend.
         let mut terminal = Terminal::new(TestBackend::new(20, 2)).expect("terminal");
@@ -458,6 +492,50 @@ mod tests {
         widget.resume_timer_at(baseline + Duration::from_secs(10));
         let after_resume = widget.elapsed_seconds_at(baseline + Duration::from_secs(13));
         assert_eq!(after_resume, before_pause + 3);
+    }
+
+    #[test]
+    fn stall_intensity_gates_on_pause_tools_and_arming() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut widget = StatusIndicatorWidget::new(
+            tx,
+            crate::tui::FrameRequester::test_dummy(),
+            /*animations_enabled*/ true,
+        );
+        let baseline = Instant::now();
+
+        assert_eq!(
+            widget.stall_intensity_at(baseline, MotionMode::Animated),
+            0.0
+        );
+
+        widget.set_stall_armed_at(Some(baseline));
+        assert_eq!(
+            widget.stall_intensity_at(baseline + Duration::from_secs(3), MotionMode::Animated),
+            0.0
+        );
+        assert_eq!(
+            widget.stall_intensity_at(baseline + Duration::from_secs(4), MotionMode::Animated),
+            0.5
+        );
+        assert_eq!(
+            widget.stall_intensity_at(baseline + Duration::from_secs(5), MotionMode::Animated),
+            1.0
+        );
+
+        widget.set_tools_active(/*active*/ true);
+        assert_eq!(
+            widget.stall_intensity_at(baseline + Duration::from_secs(5), MotionMode::Animated),
+            0.0
+        );
+
+        widget.set_tools_active(/*active*/ false);
+        widget.is_paused = true;
+        assert_eq!(
+            widget.stall_intensity_at(baseline + Duration::from_secs(5), MotionMode::Animated),
+            0.0
+        );
     }
 
     #[test]

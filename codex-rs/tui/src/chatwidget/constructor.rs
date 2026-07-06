@@ -144,6 +144,12 @@ impl ChatWidget {
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
+            active_turn_verb: None,
+            #[cfg(test)]
+            spinner_verb_override: None,
+            active_tool_calls: HashSet::new(),
+            patch_apply_in_flight: false,
+            image_generation_in_flight: false,
             turn_lifecycle: TurnLifecycleState::new(prevent_idle_sleep),
             task_complete_pending: false,
             unified_exec_processes: Vec::new(),

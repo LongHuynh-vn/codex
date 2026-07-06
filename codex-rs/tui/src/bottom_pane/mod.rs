@@ -226,6 +226,8 @@ pub(crate) struct BottomPane {
 
     /// Inline status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
+    status_tools_active: bool,
+    status_stall_armed_at: Option<Instant>,
     /// Unified exec session summary source.
     ///
     /// When a status row exists, this summary is mirrored inline in that row;
@@ -287,6 +289,8 @@ impl BottomPane {
             disable_paste_burst,
             is_task_running: false,
             status: None,
+            status_tools_active: false,
+            status_stall_armed_at: None,
             unified_exec_footer: UnifiedExecFooter::new(),
             pending_input_preview: PendingInputPreview::new(),
             pending_thread_approvals: PendingThreadApprovals::new(),
@@ -963,6 +967,23 @@ impl BottomPane {
     }
 
     #[cfg(test)]
+    pub(crate) fn freeze_status_timer_for_test(&mut self) {
+        if let Some(status) = self.status.as_mut() {
+            status.freeze_timer_for_test();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_stall_armed_at_for_test(&self) -> Option<Instant> {
+        self.status_stall_armed_at
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_tools_active_for_test(&self) -> bool {
+        self.status_tools_active
+    }
+
+    #[cfg(test)]
     pub(crate) fn status_line_text(&self) -> Option<String> {
         self.composer.status_line_text()
     }
@@ -996,6 +1017,7 @@ impl BottomPane {
                         self.frame_requester.clone(),
                         self.animations_enabled,
                     ));
+                    self.apply_status_stall_state();
                 }
                 if let Some(status) = self.status.as_mut() {
                     status.set_interrupt_hint_visible(/*visible*/ true);
@@ -1006,6 +1028,8 @@ impl BottomPane {
             }
         } else {
             // Hide the status indicator when a task completes, but keep other modal views.
+            self.status_tools_active = false;
+            self.status_stall_armed_at = None;
             self.hide_status_indicator();
         }
     }
@@ -1031,9 +1055,39 @@ impl BottomPane {
             if let Some(status) = self.status.as_mut() {
                 status.set_interrupt_binding(primary_binding(&self.keymap.chat.interrupt_turn));
             }
+            self.apply_status_stall_state();
             self.sync_status_inline_message();
             self.request_redraw();
         }
+    }
+
+    fn apply_status_stall_state(&mut self) {
+        if let Some(status) = self.status.as_mut() {
+            status.set_tools_active(self.status_tools_active);
+            status.set_stall_armed_at(self.status_stall_armed_at);
+        }
+    }
+
+    pub(crate) fn note_status_token_activity(&mut self) {
+        self.status_stall_armed_at = Some(Instant::now());
+        self.apply_status_stall_state();
+        self.request_redraw();
+    }
+
+    pub(crate) fn clear_status_token_activity(&mut self) {
+        if self.status_stall_armed_at.take().is_some() {
+            self.apply_status_stall_state();
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn set_status_tools_active(&mut self, active: bool) {
+        if active != self.status_tools_active {
+            self.status_stall_armed_at = None;
+        }
+        self.status_tools_active = active;
+        self.apply_status_stall_state();
+        self.request_redraw();
     }
 
     pub(crate) fn set_interrupt_hint_visible(&mut self, visible: bool) {
@@ -1475,6 +1529,7 @@ impl BottomPane {
     }
 
     fn pause_status_timer_for_modal(&mut self) {
+        self.clear_status_token_activity();
         if let Some(status) = self.status.as_mut() {
             status.pause_timer();
         }
@@ -1824,6 +1879,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         snapshot_buffer(&buf)
+    }
+
+    fn render_trimmed_snapshot(pane: &BottomPane, area: Rect) -> String {
+        render_snapshot(pane, area)
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn test_pane(app_event_tx: AppEventSender) -> BottomPane {
@@ -2312,6 +2375,7 @@ mod tests {
 
         // Begin a task: show initial status.
         pane.set_task_running(/*running*/ true);
+        pane.freeze_status_timer_for_test();
 
         // Use a height that allows the status line to be visible above the composer.
         let area = Rect::new(0, 0, 40, 6);
@@ -2319,7 +2383,38 @@ mod tests {
         pane.render(area, &mut buf);
 
         let bufs = snapshot_buffer(&buf);
-        assert!(bufs.contains("• Working"), "expected Working header");
+        assert!(bufs.contains("· Working"), "expected Working header");
+    }
+
+    #[test]
+    fn status_stall_state_survives_widget_recreation_and_tool_edges() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+
+        pane.set_task_running(/*running*/ true);
+        pane.note_status_token_activity();
+        assert!(pane.status_stall_armed_at_for_test().is_some());
+
+        pane.hide_status_indicator();
+        assert!(!pane.status_indicator_visible());
+
+        pane.ensure_status_indicator();
+        assert!(pane.status_indicator_visible());
+        assert!(pane.status_stall_armed_at_for_test().is_some());
+
+        pane.set_status_tools_active(/*active*/ true);
+        assert!(pane.status_tools_active_for_test());
+        assert!(pane.status_stall_armed_at_for_test().is_none());
     }
 
     #[test]
@@ -2339,6 +2434,7 @@ mod tests {
 
         // Activate spinner (status view replaces composer) with no live ring.
         pane.set_task_running(/*running*/ true);
+        pane.freeze_status_timer_for_test();
 
         // Use height == desired_height; expect spacer + status + composer rows without trailing padding.
         let height = pane.desired_height(/*width*/ 30);
@@ -2369,11 +2465,12 @@ mod tests {
         });
 
         pane.set_task_running(/*running*/ true);
+        pane.freeze_status_timer_for_test();
 
         let width = 48;
         let height = pane.desired_height(width);
         let area = Rect::new(0, 0, width, height);
-        assert_snapshot!("status_only_snapshot", render_snapshot(&pane, area));
+        assert_snapshot!("status_only_snapshot", render_trimmed_snapshot(&pane, area));
     }
 
     #[test]
@@ -2427,6 +2524,7 @@ mod tests {
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
         );
+        pane.freeze_status_timer_for_test();
         pane.set_pending_input_preview(
             vec!["Queued follow-up question".to_string()],
             Vec::new(),
@@ -2438,7 +2536,7 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         assert_snapshot!(
             "status_with_details_and_queued_messages_snapshot",
-            render_snapshot(&pane, area)
+            render_trimmed_snapshot(&pane, area)
         );
     }
 
@@ -2495,13 +2593,14 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
+        pane.freeze_status_timer_for_test();
 
         let width = 48;
         let height = pane.desired_height(width);
         let area = Rect::new(0, 0, width, height);
         assert_snapshot!(
             "status_and_queued_messages_snapshot",
-            render_snapshot(&pane, area)
+            render_trimmed_snapshot(&pane, area)
         );
     }
 

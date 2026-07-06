@@ -646,9 +646,12 @@ fn push_running_hook_header(
 ) {
     let mut header = Vec::new();
     let motion_mode = MotionMode::from_animations_enabled(animations_enabled);
-    if let Some(indicator) =
-        activity_indicator(start_time, motion_mode, ReducedMotionIndicator::Hidden)
-    {
+    if let Some(indicator) = activity_indicator(
+        start_time.map(|st| st.elapsed()).unwrap_or_default(),
+        /*stall_intensity*/ 0.0,
+        motion_mode,
+        ReducedMotionIndicator::Hidden,
+    ) {
         header.push(indicator);
         header.push(" ".into());
     }

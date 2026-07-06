@@ -112,6 +112,7 @@ async fn guardian_denied_exec_renders_warning_and_denied_request() {
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());
@@ -160,6 +161,7 @@ async fn guardian_approved_exec_renders_approved_request() {
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());
@@ -238,6 +240,7 @@ async fn guardian_approved_request_permissions_renders_request_summary() {
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());
@@ -304,6 +307,7 @@ async fn guardian_timed_out_exec_renders_warning_and_timed_out_request() {
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());
@@ -423,6 +427,7 @@ async fn app_server_guardian_review_denied_renders_denied_request_snapshot() {
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());
@@ -504,6 +509,7 @@ async fn app_server_guardian_review_timed_out_renders_timed_out_request_snapshot
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());

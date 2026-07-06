@@ -66,8 +66,9 @@ impl ChatWidget {
         self.bottom_pane
             .set_interrupt_hint_visible(/*visible*/ true);
         self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
+        self.ensure_turn_spinner_verb();
         if self.mcp_startup_status.is_none() || !self.status_header_is_mcp_startup_owned() {
-            self.set_status_header(String::from("Working"));
+            self.set_status_header(self.turn_spinner_verb().to_string());
         }
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
@@ -168,6 +169,9 @@ impl ChatWidget {
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;
         self.unified_exec_wait_streak = None;
+        self.reset_tool_activity_indicators();
+        self.bottom_pane.clear_status_token_activity();
+        self.clear_turn_spinner_verb();
         if !from_replay {
             let body = Notification::agent_turn_preview(&notification_response);
             self.set_ambient_pet_notification(crate::pets::PetNotificationKind::Review, body);
@@ -313,6 +317,9 @@ impl ChatWidget {
         self.suppressed_exec_calls.clear();
         self.last_unified_wait = None;
         self.unified_exec_wait_streak = None;
+        self.reset_tool_activity_indicators();
+        self.bottom_pane.clear_status_token_activity();
+        self.clear_turn_spinner_verb();
         self.adaptive_chunking.reset();
         self.stream_controller = None;
         self.plan_stream_controller = None;

@@ -30,7 +30,12 @@ fn plain_lines(text: &Text<'_>) -> Vec<String> {
 }
 
 fn list_marker(text: &'static str) -> Span<'static> {
-    Span::from(text).cyan()
+    let style = if text.trim_start().chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        super::MarkdownStyles::default().ordered_list_marker
+    } else {
+        super::MarkdownStyles::default().unordered_list_marker
+    };
+    Span::styled(text, style)
 }
 
 #[test]
@@ -66,18 +71,19 @@ fn paragraph_multiple() {
 fn headings() {
     let md = "# Heading 1\n## Heading 2\n### Heading 3\n#### Heading 4\n##### Heading 5\n###### Heading 6\n";
     let text = render_markdown_text(md);
+    let styles = super::MarkdownStyles::default();
     let expected = Text::from_iter([
-        Line::from("Heading 1".cyan().bold().underlined()),
+        Line::from(Span::styled("Heading 1", styles.h1)),
         Line::default(),
-        Line::from("Heading 2".light_cyan().bold()),
+        Line::from(Span::styled("Heading 2", styles.h2)),
         Line::default(),
-        Line::from("Heading 3".light_blue().bold()),
+        Line::from(Span::styled("Heading 3", styles.h3)),
         Line::default(),
-        Line::from("Heading 4".light_blue().italic()),
+        Line::from(Span::styled("Heading 4", styles.h4)),
         Line::default(),
-        Line::from("Heading 5".italic()),
+        Line::from(Span::styled("Heading 5", styles.h5)),
         Line::default(),
-        Line::from("Heading 6".italic()),
+        Line::from(Span::styled("Heading 6", styles.h6)),
     ]);
     assert_eq!(text, expected);
 }
@@ -389,10 +395,11 @@ fn blockquote_with_heading_and_paragraph() {
 #[test]
 fn blockquote_heading_inherits_heading_style() {
     let text = render_markdown_text("> # test header\n> in blockquote\n");
+    let styles = super::MarkdownStyles::default();
     assert_eq!(
         text.lines,
         [
-            Line::from_iter(["> ".into(), "test header".cyan().bold().underlined()]).green(),
+            Line::from_iter(["> ".into(), Span::styled("test header", styles.h1)]).green(),
             Line::from_iter(["> "]).green(),
             Line::from_iter(["> ", "in blockquote"]).green(),
         ]

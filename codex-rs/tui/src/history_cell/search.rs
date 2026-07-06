@@ -103,7 +103,8 @@ impl HistoryCell for WebSearchCell {
             "•".dim()
         } else {
             activity_indicator(
-                Some(self.start_time),
+                self.start_time.elapsed(),
+                /*stall_intensity*/ 0.0,
                 MotionMode::from_animations_enabled(self.animations_enabled),
                 ReducedMotionIndicator::StaticBullet,
             )

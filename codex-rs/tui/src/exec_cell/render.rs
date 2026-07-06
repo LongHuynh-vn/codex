@@ -185,7 +185,8 @@ pub(crate) fn output_lines(
 
 fn activity_marker(start_time: Option<Instant>, animations_enabled: bool) -> Span<'static> {
     activity_indicator(
-        start_time,
+        start_time.map(|st| st.elapsed()).unwrap_or_default(),
+        /*stall_intensity*/ 0.0,
         MotionMode::from_animations_enabled(animations_enabled),
         ReducedMotionIndicator::StaticBullet,
     )

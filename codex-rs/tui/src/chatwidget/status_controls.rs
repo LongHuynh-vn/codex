@@ -64,6 +64,54 @@ impl ChatWidget {
         );
     }
 
+    pub(super) fn begin_turn_spinner_verb(&mut self) {
+        self.active_turn_verb = Some(self.pick_spinner_verb());
+    }
+
+    pub(super) fn ensure_turn_spinner_verb(&mut self) {
+        if self.active_turn_verb.is_none() {
+            self.begin_turn_spinner_verb();
+        }
+    }
+
+    pub(super) fn clear_turn_spinner_verb(&mut self) {
+        self.active_turn_verb = None;
+    }
+
+    pub(super) fn turn_spinner_verb(&self) -> &'static str {
+        self.active_turn_verb.unwrap_or("Working")
+    }
+
+    fn pick_spinner_verb(&self) -> &'static str {
+        #[cfg(test)]
+        if let Some(verb) = self.spinner_verb_override {
+            return verb;
+        }
+
+        let mut rng = rand::rng();
+        crate::spinner_verbs::random_verb(&mut rng)
+    }
+
+    pub(super) fn tools_active(&self) -> bool {
+        !self.running_commands.is_empty()
+            || self.unified_exec_wait_streak.is_some()
+            || !self.active_tool_calls.is_empty()
+            || self.patch_apply_in_flight
+            || self.image_generation_in_flight
+    }
+
+    pub(super) fn sync_tools_active(&mut self) {
+        self.bottom_pane
+            .set_status_tools_active(self.tools_active());
+    }
+
+    pub(super) fn reset_tool_activity_indicators(&mut self) {
+        self.active_tool_calls.clear();
+        self.patch_apply_in_flight = false;
+        self.image_generation_in_flight = false;
+        self.sync_tools_active();
+    }
+
     /// Sets the currently rendered footer status-line value.
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
         self.bottom_pane.set_status_line(status_line);

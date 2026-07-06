@@ -12,7 +12,7 @@ impl ChatWidget {
             self.set_status_header(header);
         } else if self.bottom_pane.is_task_running() {
             self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
-            self.set_status_header(String::from("Working"));
+            self.set_status_header(self.turn_spinner_verb().to_string());
         }
     }
 
@@ -100,6 +100,7 @@ impl ChatWidget {
         }
         self.flush_answer_stream_with_separator();
         self.handle_stream_finished();
+        self.bottom_pane.clear_status_token_activity();
         self.request_redraw();
     }
 
@@ -113,6 +114,7 @@ impl ChatWidget {
         }
         if !delta.is_empty() {
             self.record_visible_turn_activity();
+            self.bottom_pane.note_status_token_activity();
         }
         if !self.transcript.plan_item_active {
             self.transcript.plan_item_active = true;
@@ -193,6 +195,9 @@ impl ChatWidget {
         // For reasoning deltas, do not stream to history. Accumulate the
         // current reasoning block and extract the first bold element
         // (between **/**) as the chunk header. Show this header as status.
+        if !delta.is_empty() {
+            self.bottom_pane.note_status_token_activity();
+        }
         self.reasoning_buffer.push_str(&delta);
 
         if self.unified_exec_wait_streak.is_some() {
@@ -234,6 +239,7 @@ impl ChatWidget {
     }
 
     pub(super) fn on_stream_error(&mut self, message: String, additional_details: Option<String>) {
+        self.bottom_pane.clear_status_token_activity();
         self.status_state.remember_retry_status_header();
         self.bottom_pane.ensure_status_indicator();
         self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
@@ -375,6 +381,7 @@ impl ChatWidget {
     pub(super) fn handle_streaming_delta(&mut self, delta: String) {
         if !delta.is_empty() {
             self.record_visible_turn_activity();
+            self.bottom_pane.note_status_token_activity();
         }
         if self.stream_controller.is_none() {
             // Before starting an agent stream, flush any active exec cell group.

@@ -337,6 +337,7 @@ async fn slash_side_requests_forked_side_question_while_task_running() {
     let width = 80;
     let height = chat.desired_height(width);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    chat.bottom_pane.freeze_status_timer_for_test();
     terminal
         .draw(|f| chat.render(f.area(), f.buffer_mut()))
         .expect("draw side conversation footer");

@@ -231,6 +231,7 @@ async fn preamble_keeps_working_status_snapshot() {
         "Preamble line\n",
         Some(MessagePhase::Commentary),
     );
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     let height = chat.desired_height(/*width*/ 80);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, height))
@@ -271,6 +272,7 @@ async fn unified_exec_begin_restores_working_status_snapshot() {
     drain_insert_history(&mut rx);
 
     begin_unified_exec_startup(&mut chat, "call-1", "proc-1", "sleep 2");
+    chat.bottom_pane.freeze_status_timer_for_test();
 
     let width: u16 = 80;
     let height = chat.desired_height(width);
@@ -412,7 +414,7 @@ async fn exec_end_without_begin_does_not_flush_unrelated_running_exploring_cell(
     );
     let active = active_blob(&chat);
     assert!(
-        active.contains("• Exploring"),
+        active.contains("Exploring"),
         "expected unrelated exploring call to remain active: {active:?}"
     );
     assert!(
@@ -489,7 +491,7 @@ async fn overlapping_exploring_exec_end_is_not_misclassified_as_orphan() {
         "expected second running command to stay in the same active cell: {active:?}"
     );
     assert!(
-        active.contains("• Exploring"),
+        active.contains("Exploring"),
         "expected grouped exploring header to remain active: {active:?}"
     );
 

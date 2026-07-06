@@ -8,6 +8,8 @@ use super::*;
 impl ChatWidget {
     pub(super) fn on_patch_apply_begin(&mut self, changes: HashMap<PathBuf, FileChange>) {
         self.record_visible_turn_activity();
+        self.patch_apply_in_flight = true;
+        self.sync_tools_active();
         self.add_to_history(history_cell::new_patch_event(
             changes,
             &self.config.cwd,
@@ -27,6 +29,8 @@ impl ChatWidget {
 
     pub(super) fn on_image_generation_begin(&mut self) {
         self.record_visible_turn_activity();
+        self.image_generation_in_flight = true;
+        self.sync_tools_active();
         self.flush_answer_stream_with_separator();
     }
 
@@ -36,6 +40,8 @@ impl ChatWidget {
         revised_prompt: Option<String>,
         saved_path: Option<AbsolutePathBuf>,
     ) {
+        self.image_generation_in_flight = false;
+        self.sync_tools_active();
         self.flush_answer_stream_with_separator();
         self.add_to_history(history_cell::new_image_generation_call(
             call_id,
@@ -71,6 +77,8 @@ impl ChatWidget {
 
     pub(super) fn on_web_search_begin(&mut self, call_id: String) {
         self.record_visible_turn_activity();
+        self.active_tool_calls.insert(call_id.clone());
+        self.sync_tools_active();
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
         self.transcript.active_cell = Some(Box::new(history_cell::new_active_web_search_call(
@@ -88,6 +96,8 @@ impl ChatWidget {
         query: String,
         action: codex_app_server_protocol::WebSearchAction,
     ) {
+        self.active_tool_calls.remove(&call_id);
+        self.sync_tools_active();
         self.flush_answer_stream_with_separator();
         let mut handled = false;
         if let Some(cell) = self
@@ -152,6 +162,8 @@ impl ChatWidget {
         let ThreadItem::FileChange { status, .. } = item else {
             return;
         };
+        self.patch_apply_in_flight = false;
+        self.sync_tools_active();
         // If the patch was successful, just let the "Edited" block stand.
         // Otherwise, add a failure block.
         if matches!(status, codex_app_server_protocol::PatchApplyStatus::Failed) {
@@ -173,6 +185,8 @@ impl ChatWidget {
         else {
             return;
         };
+        self.active_tool_calls.insert(id.clone());
+        self.sync_tools_active();
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
         self.transcript.active_cell = Some(Box::new(history_cell::new_active_mcp_tool_call(
@@ -204,6 +218,8 @@ impl ChatWidget {
         else {
             return;
         };
+        self.active_tool_calls.remove(&id);
+        self.sync_tools_active();
         let invocation = McpInvocation {
             server,
             tool,

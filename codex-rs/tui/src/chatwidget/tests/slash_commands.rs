@@ -2397,6 +2397,7 @@ async fn compact_queues_user_messages_snapshot() {
     let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
     let desired_height = chat.desired_height(width).min(height);
     term.set_viewport_area(Rect::new(0, height - desired_height, width, desired_height));
+    chat.bottom_pane.freeze_status_timer_for_test();
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());
     })

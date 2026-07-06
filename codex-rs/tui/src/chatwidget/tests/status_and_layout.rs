@@ -82,6 +82,90 @@ async fn app_server_model_verification_renders_warning() {
 }
 
 #[tokio::test]
+async fn spinner_verb_survives_reasoning_restore_and_guardian_revert() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.spinner_verb_override = Some("Pondering");
+
+    chat.on_task_started();
+    assert_eq!(chat.turn_spinner_verb(), "Pondering");
+    assert_eq!(chat.status_state.current_status.header, "Pondering");
+
+    chat.reasoning_buffer = "**Thinking**".to_string();
+    chat.restore_reasoning_status_header();
+    assert_eq!(chat.status_state.current_status.header, "Thinking");
+
+    chat.reasoning_buffer.clear();
+    chat.restore_reasoning_status_header();
+    assert_eq!(chat.status_state.current_status.header, "Pondering");
+
+    let action = GuardianAssessmentAction::Command {
+        source: GuardianCommandSource::Shell,
+        command: "rm -rf '/tmp/guardian target'".to_string(),
+        cwd: test_path_buf("/tmp").abs(),
+    };
+    chat.on_guardian_assessment(GuardianAssessmentEvent {
+        id: "guardian-1".to_string(),
+        target_item_id: Some("guardian-1-target".to_string()),
+        turn_id: "turn-1".to_string(),
+        started_at_ms: 0,
+        completed_at_ms: None,
+        status: GuardianAssessmentStatus::InProgress,
+        risk_level: None,
+        user_authorization: None,
+        rationale: None,
+        decision_source: None,
+        action: action.clone(),
+    });
+    chat.on_guardian_assessment(GuardianAssessmentEvent {
+        id: "guardian-1".to_string(),
+        target_item_id: Some("guardian-1-target".to_string()),
+        turn_id: "turn-1".to_string(),
+        started_at_ms: 0,
+        completed_at_ms: Some(1),
+        status: GuardianAssessmentStatus::Denied,
+        risk_level: Some(GuardianRiskLevel::High),
+        user_authorization: Some(GuardianUserAuthorization::Low),
+        rationale: Some("Would delete important data.".to_string()),
+        decision_source: Some(GuardianAssessmentDecisionSource::Agent),
+        action,
+    });
+    assert_eq!(chat.status_state.current_status.header, "Pondering");
+
+    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    assert_eq!(chat.turn_spinner_verb(), "Working");
+}
+
+#[tokio::test]
+async fn stall_clock_arms_on_deltas_and_disarms_on_tools_and_finalize() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.on_task_started();
+    assert!(chat.bottom_pane.status_stall_armed_at_for_test().is_none());
+    assert!(!chat.bottom_pane.status_tools_active_for_test());
+
+    chat.on_agent_reasoning_delta("thinking".to_string());
+    assert!(chat.bottom_pane.status_stall_armed_at_for_test().is_some());
+
+    let exec = begin_exec(&mut chat, "call-1", "echo hi");
+    assert!(chat.bottom_pane.status_stall_armed_at_for_test().is_none());
+    assert!(chat.bottom_pane.status_tools_active_for_test());
+
+    end_exec(&mut chat, exec, "", "", 0);
+    assert!(chat.bottom_pane.status_stall_armed_at_for_test().is_none());
+    assert!(!chat.bottom_pane.status_tools_active_for_test());
+
+    chat.on_agent_message_delta("done".to_string());
+    assert!(chat.bottom_pane.status_stall_armed_at_for_test().is_some());
+
+    complete_assistant_message(&mut chat, "msg-1", "done", Some(MessagePhase::FinalAnswer));
+    assert!(chat.bottom_pane.status_stall_armed_at_for_test().is_none());
+
+    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    assert!(chat.bottom_pane.status_stall_armed_at_for_test().is_none());
+    assert!(!chat.bottom_pane.status_tools_active_for_test());
+}
+
+#[tokio::test]
 async fn context_indicator_shows_used_tokens_when_window_unknown() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("unknown-model")).await;
 
@@ -3754,6 +3838,7 @@ async fn chatwidget_tall() {
     let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
     let desired_height = chat.desired_height(width).min(height);
     term.set_viewport_area(Rect::new(0, height - desired_height, width, desired_height));
+    chat.bottom_pane.freeze_status_timer_for_test();
     term.draw(|f| {
         chat.render(f.area(), f.buffer_mut());
     })

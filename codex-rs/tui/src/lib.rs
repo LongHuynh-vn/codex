@@ -177,6 +177,7 @@ mod session_state;
 mod shimmer;
 mod skills_helpers;
 mod slash_command;
+mod spinner_verbs;
 mod startup_error;
 mod startup_hooks_review;
 mod status;

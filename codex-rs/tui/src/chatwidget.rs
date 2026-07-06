@@ -575,6 +575,12 @@ pub(crate) struct ChatWidget {
     skills_initial_state: Option<HashMap<AbsolutePathBuf, bool>>,
     last_unified_wait: Option<UnifiedExecWaitState>,
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
+    active_turn_verb: Option<&'static str>,
+    #[cfg(test)]
+    spinner_verb_override: Option<&'static str>,
+    active_tool_calls: HashSet<String>,
+    patch_apply_in_flight: bool,
+    image_generation_in_flight: bool,
     turn_lifecycle: TurnLifecycleState,
     task_complete_pending: bool,
     unified_exec_processes: Vec<UnifiedExecProcessSummary>,

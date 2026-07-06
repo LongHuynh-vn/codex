@@ -222,6 +222,14 @@ mod tests {
     use super::*;
     use ratatui::style::Color;
 
+    fn ordered_list_marker_fg_for_tests() -> Option<Color> {
+        crate::markdown_render::render_markdown_text("1. item")
+            .lines
+            .first()
+            .and_then(|line| line.spans.first())
+            .and_then(|span| span.style.fg)
+    }
+
     #[tokio::test]
     async fn no_commit_until_newline() {
         let mut c = super::MarkdownStreamCollector::new(/*width*/ None, &super::test_cwd());
@@ -292,7 +300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_nested_mixed_lists_ordered_marker_is_cyan() {
+    async fn e2e_stream_nested_mixed_lists_ordered_marker_uses_renderer_style() {
         let md = [
             "1. First\n",
             "   - Second level\n",
@@ -311,14 +319,15 @@ mod tests {
         });
         let idx = find_idx.expect("expected third-level ordered line");
         let line = &out[idx];
-        // Ordered-list markers use the configured cyan foreground.
-        let has_cyan_marker = line
+        // Ordered-list markers use the configured renderer foreground.
+        let expected_fg = ordered_list_marker_fg_for_tests();
+        let has_expected_marker = line
             .spans
             .iter()
-            .any(|s| s.content.trim().starts_with("1.") && s.style.fg == Some(Color::Cyan));
+            .any(|s| s.content.trim().starts_with("1.") && s.style.fg == expected_fg);
         assert!(
-            has_cyan_marker,
-            "expected an ordered-list marker span with cyan fg on: {line:?}"
+            has_expected_marker,
+            "expected an ordered-list marker span with {expected_fg:?} fg on: {line:?}"
         );
     }
 
@@ -582,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_stream_deep_nested_third_level_marker_is_cyan() {
+    async fn e2e_stream_deep_nested_third_level_marker_uses_renderer_style() {
         let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
         let streamed = super::simulate_stream_markdown_for_tests(&[md], /*finalize*/ true);
         let streamed_strs = lines_to_plain_strings(&streamed);
@@ -602,16 +611,16 @@ mod tests {
         });
 
         // The marker (including indent and "1.") is expected to be in the first span
-        // with cyan color; following content should be default color.
+        // with the renderer's configured marker color; following content should be default color.
         assert!(
             !line.spans.is_empty(),
             "expected non-empty spans for the third-level line"
         );
+        let expected_fg = ordered_list_marker_fg_for_tests();
         let marker_span = &line.spans[0];
         assert_eq!(
-            marker_span.style.fg,
-            Some(Color::Cyan),
-            "expected cyan 3rd-level ordered marker, got {:?}",
+            marker_span.style.fg, expected_fg,
+            "expected {expected_fg:?} 3rd-level ordered marker, got {:?}",
             marker_span.style.fg
         );
         // Find the first non-empty non-space content span and verify it is default color.

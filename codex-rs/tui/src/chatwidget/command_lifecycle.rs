@@ -15,6 +15,7 @@ impl ChatWidget {
         self.app_event_tx
             .send(AppEvent::InsertHistoryCell(Box::new(cell)));
         self.restore_reasoning_status_header();
+        self.sync_tools_active();
     }
 
     pub(super) fn on_command_execution_started(&mut self, item: ThreadItem) {
@@ -115,6 +116,7 @@ impl ChatWidget {
                         Some(UnifiedExecWaitStreak::new(process_id, command_display));
                 }
             }
+            self.sync_tools_active();
             self.request_redraw();
         } else {
             if self
@@ -264,6 +266,7 @@ impl ChatWidget {
                 source,
             },
         );
+        self.sync_tools_active();
         let is_wait_interaction = matches!(source, ExecCommandSource::UnifiedExecInteraction);
         let command_display = command.join(" ");
         let should_suppress_unified_wait = is_wait_interaction
@@ -355,6 +358,7 @@ impl ChatWidget {
         let aggregated_output = aggregated_output.unwrap_or_default();
 
         let running = self.running_commands.remove(&id);
+        self.sync_tools_active();
         if self.suppressed_exec_calls.remove(&id) {
             return;
         }
