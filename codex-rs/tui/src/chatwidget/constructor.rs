@@ -145,6 +145,7 @@ impl ChatWidget {
             last_unified_wait: None,
             unified_exec_wait_streak: None,
             active_turn_verb: None,
+            active_turn_verb_seed: None,
             #[cfg(test)]
             spinner_verb_override: None,
             active_tool_calls: HashSet::new(),

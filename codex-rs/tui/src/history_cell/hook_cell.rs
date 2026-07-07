@@ -655,7 +655,11 @@ fn push_running_hook_header(
         header.push(indicator);
         header.push(" ".into());
     }
-    header.extend(shimmer_text(hook_text, motion_mode));
+    header.extend(shimmer_text(
+        hook_text,
+        motion_mode,
+        crate::motion::HOOK_ACCENT_PALETTE,
+    ));
     if !animations_enabled && let Some(span) = header.last_mut() {
         span.style = span.style.patch(Style::default().bold());
     }

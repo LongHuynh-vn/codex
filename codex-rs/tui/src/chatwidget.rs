@@ -576,6 +576,7 @@ pub(crate) struct ChatWidget {
     last_unified_wait: Option<UnifiedExecWaitState>,
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
     active_turn_verb: Option<&'static str>,
+    active_turn_verb_seed: Option<u64>,
     #[cfg(test)]
     spinner_verb_override: Option<&'static str>,
     active_tool_calls: HashSet<String>,
@@ -944,8 +945,14 @@ impl ChatWidget {
     }
 
     fn restore_retry_status_header_if_present(&mut self) {
-        if let Some(header) = self.status_state.take_retry_status_header() {
-            self.set_status_header(header);
+        if let Some((header, verb_rotation_seed)) = self.status_state.take_retry_status_header() {
+            self.set_status(
+                header,
+                /*details*/ None,
+                StatusDetailsCapitalization::CapitalizeFirst,
+                STATUS_DETAILS_DEFAULT_MAX_LINES,
+                verb_rotation_seed,
+            );
         }
     }
 

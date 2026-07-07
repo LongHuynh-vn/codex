@@ -496,6 +496,7 @@ impl AuthModeWidget {
             spans.extend(shimmer_text(
                 "Finish signing in via your browser",
                 MotionMode::Animated,
+                crate::motion::ShimmerPalette::Default,
             ));
         } else {
             spans.push("Finish signing in via your browser".into());

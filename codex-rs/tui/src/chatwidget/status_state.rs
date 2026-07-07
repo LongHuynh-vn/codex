@@ -7,6 +7,9 @@ pub(super) struct StatusIndicatorState {
     pub(super) header: String,
     pub(super) details: Option<String>,
     pub(super) details_max_lines: usize,
+    /// Present only when `header` is the rotatable turn spinner verb; the
+    /// status widget derives time-rotated verbs from this seed.
+    pub(super) verb_rotation_seed: Option<u64>,
 }
 
 impl StatusIndicatorState {
@@ -15,6 +18,7 @@ impl StatusIndicatorState {
             header: String::from("Working"),
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
+            verb_rotation_seed: None,
         }
     }
 
@@ -100,6 +104,7 @@ impl PendingGuardianReviewStatus {
             header,
             details: Some(details),
             details_max_lines,
+            verb_rotation_seed: None,
         })
     }
 }
@@ -109,7 +114,7 @@ pub(super) struct StatusState {
     pub(super) current_status: StatusIndicatorState,
     pub(super) pending_guardian_review_status: PendingGuardianReviewStatus,
     pub(super) terminal_title_status_kind: TerminalTitleStatusKind,
-    pub(super) retry_status_header: Option<String>,
+    pub(super) retry_status_header: Option<(String, Option<u64>)>,
     pub(super) pending_status_indicator_restore: bool,
 }
 
@@ -130,13 +135,16 @@ impl StatusState {
         self.current_status = status;
     }
 
-    pub(super) fn take_retry_status_header(&mut self) -> Option<String> {
+    pub(super) fn take_retry_status_header(&mut self) -> Option<(String, Option<u64>)> {
         self.retry_status_header.take()
     }
 
     pub(super) fn remember_retry_status_header(&mut self) {
         if self.retry_status_header.is_none() {
-            self.retry_status_header = Some(self.current_status.header.clone());
+            self.retry_status_header = Some((
+                self.current_status.header.clone(),
+                self.current_status.verb_rotation_seed,
+            ));
         }
     }
 }
@@ -159,6 +167,7 @@ mod tests {
                 header: "Reviewing 2 approval requests".to_string(),
                 details: Some("• first\n• second".to_string()),
                 details_max_lines: 4,
+                verb_rotation_seed: None,
             })
         );
     }
@@ -167,12 +176,13 @@ mod tests {
     fn retry_status_header_is_taken_once() {
         let mut state = StatusState::default();
         state.current_status.header = "Thinking".to_string();
+        state.current_status.verb_rotation_seed = Some(42);
 
         state.remember_retry_status_header();
 
         assert_eq!(
             state.take_retry_status_header(),
-            Some("Thinking".to_string())
+            Some(("Thinking".to_string(), Some(42)))
         );
         assert_eq!(state.take_retry_status_header(), None);
     }

@@ -1,7 +1,5 @@
 //! Whimsical per-turn status verbs shown while the agent is working.
 
-use rand::Rng;
-
 pub(crate) const SPINNER_VERBS: [&str; 54] = [
     "Aligning",
     "Arranging",
@@ -59,8 +57,14 @@ pub(crate) const SPINNER_VERBS: [&str; 54] = [
     "Whittling",
 ];
 
-pub(crate) fn random_verb<R: Rng + ?Sized>(rng: &mut R) -> &'static str {
-    SPINNER_VERBS[rng.random_range(0..SPINNER_VERBS.len())]
+/// Deterministic verb for rotation `phase` of a turn seeded with `seed`.
+///
+/// The stride is co-prime with the verb count, so consecutive phases always
+/// yield different verbs and a full cycle visits every verb.
+pub(crate) fn verb_for_phase(seed: u64, phase: u64) -> &'static str {
+    const STRIDE: u64 = 25;
+    let count = SPINNER_VERBS.len() as u64;
+    SPINNER_VERBS[((seed % count + (phase % count) * STRIDE) % count) as usize]
 }
 
 #[cfg(test)]
@@ -68,20 +72,42 @@ mod tests {
     use std::collections::HashSet;
 
     use pretty_assertions::assert_eq;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
 
     use super::*;
 
     #[test]
-    fn random_verb_is_reproducible_for_seed() {
-        let mut first = StdRng::seed_from_u64(42);
-        let mut second = StdRng::seed_from_u64(42);
+    fn verb_for_phase_is_deterministic() {
+        for seed in [0u64, 1, 42, u64::MAX] {
+            for phase in [0u64, 1, 53, 54, 1000] {
+                let verb = verb_for_phase(seed, phase);
+                assert_eq!(verb, verb_for_phase(seed, phase));
+                assert!(
+                    SPINNER_VERBS.contains(&verb),
+                    "{verb} should be a known verb"
+                );
+            }
+        }
+    }
 
-        let first_sequence = (0..8).map(|_| random_verb(&mut first)).collect::<Vec<_>>();
-        let second_sequence = (0..8).map(|_| random_verb(&mut second)).collect::<Vec<_>>();
-
-        assert_eq!(first_sequence, second_sequence);
+    #[test]
+    fn verb_for_phase_rotates_without_consecutive_repeats() {
+        for seed in [0u64, 7, 42, 1337] {
+            let cycle = (0..SPINNER_VERBS.len() as u64)
+                .map(|phase| verb_for_phase(seed, phase))
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                cycle.len(),
+                SPINNER_VERBS.len(),
+                "cycle should visit every verb"
+            );
+            for phase in 0..2 * SPINNER_VERBS.len() as u64 {
+                assert_ne!(
+                    verb_for_phase(seed, phase),
+                    verb_for_phase(seed, phase + 1),
+                    "consecutive phases should differ for seed {seed}"
+                );
+            }
+        }
     }
 
     #[test]

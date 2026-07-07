@@ -14,6 +14,11 @@ use crate::color::blend;
 use crate::shimmer::shimmer_spans;
 use crate::terminal_palette::default_fg;
 
+pub(crate) use crate::shimmer::GEMINI_VERB_PALETTE;
+pub(crate) use crate::shimmer::HOOK_ACCENT_PALETTE;
+pub(crate) use crate::shimmer::PLUGIN_ACCENT_PALETTE;
+pub(crate) use crate::shimmer::ShimmerPalette;
+
 const BLOOM_FRAME_INTERVAL_MS: u128 = 110;
 const STALL_GRACE: Duration = Duration::from_secs(3);
 const STALL_RAMP: Duration = Duration::from_secs(2);
@@ -56,9 +61,13 @@ pub(crate) fn activity_indicator(
     }
 }
 
-pub(crate) fn shimmer_text(text: &str, motion_mode: MotionMode) -> Vec<Span<'static>> {
+pub(crate) fn shimmer_text(
+    text: &str,
+    motion_mode: MotionMode,
+    palette: ShimmerPalette,
+) -> Vec<Span<'static>> {
     match motion_mode {
-        MotionMode::Animated => shimmer_spans(text),
+        MotionMode::Animated => shimmer_spans(text, palette),
         MotionMode::Reduced => {
             if text.is_empty() {
                 Vec::new()
@@ -112,7 +121,9 @@ fn animated_activity_indicator(elapsed: Duration, stall_intensity: f32) -> Span<
         .map(|level| level.has_16m)
         .unwrap_or(false)
     {
-        let mut span = shimmer_spans(glyph)
+        // The glyph stays on the default palette so the stall-red tint keeps
+        // its salience.
+        let mut span = shimmer_spans(glyph, ShimmerPalette::Default)
             .into_iter()
             .next()
             .unwrap_or_else(|| glyph.into());
@@ -234,14 +245,16 @@ mod tests {
 
     #[test]
     fn reduced_motion_shimmer_text_is_plain_text() {
-        assert_eq!(
-            shimmer_text("Loading", MotionMode::Reduced),
-            vec!["Loading".into()]
-        );
-        assert_eq!(
-            shimmer_text("", MotionMode::Reduced),
-            Vec::<Span<'static>>::new()
-        );
+        for palette in [ShimmerPalette::Default, GEMINI_VERB_PALETTE] {
+            assert_eq!(
+                shimmer_text("Loading", MotionMode::Reduced, palette),
+                vec!["Loading".into()]
+            );
+            assert_eq!(
+                shimmer_text("", MotionMode::Reduced, palette),
+                Vec::<Span<'static>>::new()
+            );
+        }
     }
 
     #[test]

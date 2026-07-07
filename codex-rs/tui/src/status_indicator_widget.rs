@@ -35,6 +35,8 @@ use crate::wrapping::word_wrap_lines;
 
 pub(crate) const STATUS_DETAILS_DEFAULT_MAX_LINES: usize = 3;
 const DETAILS_PREFIX: &str = "  └ ";
+/// How much visible elapsed time passes before the turn verb rotates.
+const VERB_ROTATE_EVERY_SECS: u64 = 45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusDetailsCapitalization {
@@ -46,6 +48,9 @@ pub(crate) enum StatusDetailsCapitalization {
 pub(crate) struct StatusIndicatorWidget {
     /// Animated header text (defaults to "Working").
     header: String,
+    /// Present only when `header` is the rotatable turn spinner verb; drives
+    /// time-based verb rotation from the elapsed timer.
+    header_verb_seed: Option<u64>,
     details: Option<String>,
     details_max_lines: usize,
     /// Optional suffix rendered after the elapsed/interrupt segment.
@@ -88,6 +93,7 @@ impl StatusIndicatorWidget {
     ) -> Self {
         Self {
             header: String::from("Working"),
+            header_verb_seed: None,
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
@@ -111,8 +117,13 @@ impl StatusIndicatorWidget {
     }
 
     /// Update the animated header label (left of the brackets).
-    pub(crate) fn update_header(&mut self, header: String) {
+    ///
+    /// `verb_rotation_seed` is `Some` only when `header` is the turn spinner
+    /// verb, which rotates as elapsed time crosses [`VERB_ROTATE_EVERY_SECS`]
+    /// boundaries; other headers render verbatim.
+    pub(crate) fn update_header(&mut self, header: String, verb_rotation_seed: Option<u64>) {
         self.header = header;
+        self.header_verb_seed = verb_rotation_seed;
     }
 
     /// Update the details text shown below the header.
@@ -293,7 +304,25 @@ impl Renderable for StatusIndicatorWidget {
             spans.push(indicator);
             spans.push(" ".into());
         }
-        spans.extend(shimmer_text(&self.header, motion_mode));
+        let displayed_header: &str = match self.header_verb_seed {
+            // Rotation is derived from the same elapsed clock the row already
+            // shows; reduced motion keeps the initial verb verbatim.
+            Some(seed) if motion_mode == MotionMode::Animated => {
+                crate::spinner_verbs::verb_for_phase(
+                    seed,
+                    elapsed_duration.as_secs() / VERB_ROTATE_EVERY_SECS,
+                )
+            }
+            _ => &self.header,
+        };
+        // Only the turn verb carries the brand gradient; reasoning-derived and
+        // arbitrary headers stay on the default palette.
+        let header_palette = if self.header_verb_seed.is_some() {
+            crate::motion::GEMINI_VERB_PALETTE
+        } else {
+            crate::motion::ShimmerPalette::Default
+        };
+        spans.extend(shimmer_text(displayed_header, motion_mode, header_palette));
         if !spans.is_empty() {
             spans.push(" ".into());
         }
@@ -536,6 +565,81 @@ mod tests {
             widget.stall_intensity_at(baseline + Duration::from_secs(5), MotionMode::Animated),
             0.0
         );
+    }
+
+    fn rendered_first_line(w: &StatusIndicatorWidget, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+        terminal
+            .draw(|f| w.render(f.area(), f.buffer_mut()))
+            .expect("draw");
+        terminal.backend().buffer().content()[..usize::from(width)]
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>()
+    }
+
+    #[test]
+    fn verb_header_rotates_after_interval() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut w = StatusIndicatorWidget::new(
+            tx,
+            crate::tui::FrameRequester::test_dummy(),
+            /*animations_enabled*/ true,
+        );
+        let seed = 7u64;
+        let phase0 = crate::spinner_verbs::verb_for_phase(seed, 0);
+        let phase1 = crate::spinner_verbs::verb_for_phase(seed, 1);
+        assert_ne!(phase0, phase1);
+        w.update_header(phase0.to_string(), Some(seed));
+        w.is_paused = true;
+
+        w.elapsed_running = Duration::ZERO;
+        let initial = rendered_first_line(&w, 80);
+        assert!(initial.contains(phase0), "expected {phase0} in {initial}");
+
+        w.elapsed_running = Duration::from_secs(46);
+        let rotated = rendered_first_line(&w, 80);
+        assert!(rotated.contains(phase1), "expected {phase1} in {rotated}");
+    }
+
+    #[test]
+    fn arbitrary_header_never_rotates() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut w = StatusIndicatorWidget::new(
+            tx,
+            crate::tui::FrameRequester::test_dummy(),
+            /*animations_enabled*/ true,
+        );
+        w.update_header(
+            "Custom header".to_string(),
+            /*verb_rotation_seed*/ None,
+        );
+        w.is_paused = true;
+        w.elapsed_running = Duration::from_secs(600);
+
+        let line = rendered_first_line(&w, 80);
+        assert!(line.contains("Custom header"), "expected header in {line}");
+    }
+
+    #[test]
+    fn reduced_motion_header_never_rotates() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut w = StatusIndicatorWidget::new(
+            tx,
+            crate::tui::FrameRequester::test_dummy(),
+            /*animations_enabled*/ false,
+        );
+        let seed = 7u64;
+        let phase0 = crate::spinner_verbs::verb_for_phase(seed, 0);
+        w.update_header(phase0.to_string(), Some(seed));
+        w.is_paused = true;
+        w.elapsed_running = Duration::from_secs(46);
+
+        let line = rendered_first_line(&w, 80);
+        assert!(line.contains(phase0), "expected {phase0} in {line}");
     }
 
     #[test]

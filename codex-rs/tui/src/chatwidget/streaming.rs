@@ -12,7 +12,7 @@ impl ChatWidget {
             self.set_status_header(header);
         } else if self.bottom_pane.is_task_running() {
             self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
-            self.set_status_header(self.turn_spinner_verb().to_string());
+            self.set_turn_verb_status_header();
         }
     }
 
@@ -85,6 +85,7 @@ impl ChatWidget {
             self.status_state.current_status.details.clone(),
             StatusDetailsCapitalization::Preserve,
             self.status_state.current_status.details_max_lines,
+            self.status_state.current_status.verb_rotation_seed,
         );
         self.status_state.pending_status_indicator_restore = false;
     }
@@ -248,6 +249,7 @@ impl ChatWidget {
             additional_details,
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
+            /*verb_rotation_seed*/ None,
         );
     }
 

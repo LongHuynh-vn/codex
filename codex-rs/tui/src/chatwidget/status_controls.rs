@@ -9,13 +9,15 @@ use super::*;
 impl ChatWidget {
     /// Update the status indicator header and details.
     ///
-    /// Passing `None` clears any existing details.
+    /// Passing `None` clears any existing details. `verb_rotation_seed` is
+    /// `Some` only when `header` is the rotatable turn spinner verb.
     pub(super) fn set_status(
         &mut self,
         header: String,
         details: Option<String>,
         details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
+        verb_rotation_seed: Option<u64>,
     ) {
         let details = details
             .filter(|details| !details.is_empty())
@@ -32,12 +34,14 @@ impl ChatWidget {
             header: header.clone(),
             details: details.clone(),
             details_max_lines,
+            verb_rotation_seed,
         });
         self.bottom_pane.update_status(
             header,
             details,
             StatusDetailsCapitalization::Preserve,
             details_max_lines,
+            verb_rotation_seed,
         );
         let title_uses_status = self
             .config
@@ -61,11 +65,33 @@ impl ChatWidget {
             /*details*/ None,
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
+            /*verb_rotation_seed*/ None,
+        );
+    }
+
+    /// Shows the current turn spinner verb as the status header, carrying the
+    /// rotation seed so the status widget can rotate it over time.
+    pub(super) fn set_turn_verb_status_header(&mut self) {
+        self.set_status(
+            self.turn_spinner_verb().to_string(),
+            /*details*/ None,
+            StatusDetailsCapitalization::CapitalizeFirst,
+            STATUS_DETAILS_DEFAULT_MAX_LINES,
+            self.active_turn_verb_seed,
         );
     }
 
     pub(super) fn begin_turn_spinner_verb(&mut self) {
-        self.active_turn_verb = Some(self.pick_spinner_verb());
+        #[cfg(test)]
+        if let Some(verb) = self.spinner_verb_override {
+            self.active_turn_verb = Some(verb);
+            self.active_turn_verb_seed = None;
+            return;
+        }
+
+        let seed = rand::Rng::random::<u64>(&mut rand::rng());
+        self.active_turn_verb = Some(crate::spinner_verbs::verb_for_phase(seed, /*phase*/ 0));
+        self.active_turn_verb_seed = Some(seed);
     }
 
     pub(super) fn ensure_turn_spinner_verb(&mut self) {
@@ -76,20 +102,11 @@ impl ChatWidget {
 
     pub(super) fn clear_turn_spinner_verb(&mut self) {
         self.active_turn_verb = None;
+        self.active_turn_verb_seed = None;
     }
 
     pub(super) fn turn_spinner_verb(&self) -> &'static str {
         self.active_turn_verb.unwrap_or("Working")
-    }
-
-    fn pick_spinner_verb(&self) -> &'static str {
-        #[cfg(test)]
-        if let Some(verb) = self.spinner_verb_override {
-            return verb;
-        }
-
-        let mut rng = rand::rng();
-        crate::spinner_verbs::random_verb(&mut rng)
     }
 
     pub(super) fn tools_active(&self) -> bool {

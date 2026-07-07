@@ -136,6 +136,45 @@ async fn spinner_verb_survives_reasoning_restore_and_guardian_revert() {
 }
 
 #[tokio::test]
+async fn verb_rotation_seed_tracks_header_source() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    // The test factory pins the verb via the override, which disables rotation;
+    // clear it so the real seed-drawing path runs.
+    chat.spinner_verb_override = None;
+
+    chat.on_task_started();
+    assert!(
+        chat.status_state
+            .current_status
+            .verb_rotation_seed
+            .is_some(),
+        "turn verb header should carry a rotation seed"
+    );
+
+    chat.reasoning_buffer = "**Thinking**".to_string();
+    chat.restore_reasoning_status_header();
+    assert_eq!(chat.status_state.current_status.header, "Thinking");
+    assert_eq!(
+        chat.status_state.current_status.verb_rotation_seed, None,
+        "reasoning-derived headers must never rotate"
+    );
+
+    chat.reasoning_buffer.clear();
+    chat.restore_reasoning_status_header();
+    assert_eq!(
+        chat.status_state.current_status.header,
+        chat.turn_spinner_verb()
+    );
+    assert!(
+        chat.status_state
+            .current_status
+            .verb_rotation_seed
+            .is_some(),
+        "restoring the verb header should re-arm rotation"
+    );
+}
+
+#[tokio::test]
 async fn stall_clock_arms_on_deltas_and_disarms_on_tools_and_finalize() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

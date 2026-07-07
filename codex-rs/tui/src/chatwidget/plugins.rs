@@ -118,6 +118,7 @@ impl Renderable for DelayedLoadingHeader {
             lines.push(Line::from(shimmer_text(
                 self.loading_text.as_str(),
                 MotionMode::Animated,
+                crate::motion::PLUGIN_ACCENT_PALETTE,
             )));
         } else {
             lines.push(Line::from(self.loading_text.as_str().dim()));

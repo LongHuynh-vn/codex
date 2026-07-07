@@ -115,6 +115,7 @@ impl ChatWidget {
                     status.details,
                     StatusDetailsCapitalization::Preserve,
                     status.details_max_lines,
+                    status.verb_rotation_seed,
                 );
             }
             self.request_redraw();
@@ -138,14 +139,15 @@ impl ChatWidget {
                     status.details,
                     StatusDetailsCapitalization::Preserve,
                     status.details_max_lines,
+                    status.verb_rotation_seed,
                 );
             } else if self.status_state.current_status.is_guardian_review() {
-                self.set_status_header(self.turn_spinner_verb().to_string());
+                self.set_turn_verb_status_header();
             }
         } else if self.status_state.pending_guardian_review_status.is_empty()
             && self.status_state.current_status.is_guardian_review()
         {
-            self.set_status_header(self.turn_spinner_verb().to_string());
+            self.set_turn_verb_status_header();
         }
 
         if ev.status == GuardianAssessmentStatus::Approved {

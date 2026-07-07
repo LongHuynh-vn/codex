@@ -99,7 +99,11 @@ pub(super) fn render_device_code_login(
         widget
             .request_frame
             .schedule_frame_in(std::time::Duration::from_millis(100));
-        spans.extend(shimmer_text(banner, MotionMode::Animated));
+        spans.extend(shimmer_text(
+            banner,
+            MotionMode::Animated,
+            crate::motion::ShimmerPalette::Default,
+        ));
     } else {
         spans.push(banner.into());
     }

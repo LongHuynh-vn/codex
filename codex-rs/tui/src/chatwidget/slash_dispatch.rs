@@ -677,7 +677,7 @@ impl ChatWidget {
                     self.reasoning_buffer.clear();
                     self.full_reasoning_buffer.clear();
                     self.begin_turn_spinner_verb();
-                    self.set_status_header(self.turn_spinner_verb().to_string());
+                    self.set_turn_verb_status_header();
                     self.submit_user_message(user_message);
                 } else {
                     self.queue_user_message(user_message);

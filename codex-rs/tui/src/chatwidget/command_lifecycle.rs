@@ -101,6 +101,7 @@ impl ChatWidget {
                 command_display.clone(),
                 StatusDetailsCapitalization::Preserve,
                 /*details_max_lines*/ 1,
+                /*verb_rotation_seed*/ None,
             );
             match &mut self.unified_exec_wait_streak {
                 Some(wait) if wait.process_id == process_id => {

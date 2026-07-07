@@ -540,6 +540,7 @@ impl ChatWidget {
             Some("Hang tight, this may take a few minutes".to_string()),
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
+            /*verb_rotation_seed*/ None,
         );
         self.request_redraw();
     }

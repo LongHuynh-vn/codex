@@ -68,7 +68,7 @@ impl ChatWidget {
         self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Working;
         self.ensure_turn_spinner_verb();
         if self.mcp_startup_status.is_none() || !self.status_header_is_mcp_startup_owned() {
-            self.set_status_header(self.turn_spinner_verb().to_string());
+            self.set_turn_verb_status_header();
         }
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();

@@ -906,15 +906,17 @@ impl BottomPane {
     /// Update the status indicator header (defaults to "Working") and details below it.
     ///
     /// Passing `None` clears any existing details. No-ops if the status indicator is not active.
+    /// `verb_rotation_seed` is `Some` only when `header` is the rotatable turn spinner verb.
     pub(crate) fn update_status(
         &mut self,
         header: String,
         details: Option<String>,
         details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
+        verb_rotation_seed: Option<u64>,
     ) {
         if let Some(status) = self.status.as_mut() {
-            status.update_header(header);
+            status.update_header(header, verb_rotation_seed);
             status.update_details(details, details_capitalization, details_max_lines.max(1));
             self.request_redraw();
         }
@@ -2523,6 +2525,7 @@ mod tests {
             Some("First detail line\nSecond detail line".to_string()),
             StatusDetailsCapitalization::CapitalizeFirst,
             STATUS_DETAILS_DEFAULT_MAX_LINES,
+            /*verb_rotation_seed*/ None,
         );
         pane.freeze_status_timer_for_test();
         pane.set_pending_input_preview(
