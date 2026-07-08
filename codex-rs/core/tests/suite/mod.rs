@@ -53,6 +53,7 @@ mod exec_policy;
 mod fork_thread;
 mod gemini_native_phase2;
 mod gemini_native_phase4;
+mod gemini_plan_mode;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 mod hierarchical_agents;

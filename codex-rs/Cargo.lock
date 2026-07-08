@@ -2534,6 +2534,7 @@ dependencies = [
  "codex-apply-patch",
  "codex-async-utils",
  "codex-code-mode",
+ "codex-collaboration-mode-templates",
  "codex-config",
  "codex-connectors",
  "codex-context-fragments",

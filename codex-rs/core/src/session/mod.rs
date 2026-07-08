@@ -2857,7 +2857,10 @@ impl Session {
         // Add developer instructions from collaboration_mode if they exist and are non-empty
         if turn_context.config.include_collaboration_mode_instructions
             && let Some(collab_instructions) =
-                CollaborationModeInstructions::from_collaboration_mode(&collaboration_mode)
+                CollaborationModeInstructions::from_collaboration_mode(
+                    &collaboration_mode,
+                    turn_context.provider.info().is_gemini(),
+                )
         {
             developer_sections.push(collab_instructions.render());
         }

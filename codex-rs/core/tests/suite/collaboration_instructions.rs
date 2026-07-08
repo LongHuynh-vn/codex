@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_collaboration_mode_templates::PLAN as COLLABORATION_MODE_PLAN;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -17,6 +18,8 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+
+const PLAN_QUALITY_CONTRACT_MARKER: &str = "## Plan quality contract (strict)";
 
 fn collab_mode_with_mode_and_instructions(
     mode: ModeKind,
@@ -55,6 +58,57 @@ fn collab_xml(text: &str) -> String {
 
 fn count_messages_containing(texts: &[String], target: &str) -> usize {
     texts.iter().filter(|text| text.contains(target)).count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_mode_stock_template_unchanged_on_responses_path() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let req = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let test = test_codex().build(&server).await?;
+    core_test_support::submit_thread_settings(
+        &test.codex,
+        codex_protocol::protocol::ThreadSettingsOverrides {
+            collaboration_mode: Some(collab_mode_with_mode_and_instructions(
+                ModeKind::Plan,
+                Some(COLLABORATION_MODE_PLAN),
+            )),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let input = req.single_request().input();
+    let dev_texts = developer_texts(&input);
+    let collab_text = collab_xml(COLLABORATION_MODE_PLAN);
+    assert_eq!(count_messages_containing(&dev_texts, &collab_text), 1);
+    assert_eq!(
+        count_messages_containing(&dev_texts, PLAN_QUALITY_CONTRACT_MARKER),
+        0
+    );
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
