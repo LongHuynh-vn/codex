@@ -152,6 +152,7 @@ impl ChatWidget {
         if !plan_text.trim().is_empty() {
             self.record_agent_markdown(&plan_text);
             self.transcript.latest_proposed_plan_markdown = Some(plan_text.clone());
+            self.transcript.last_completed_proposed_plan_markdown = Some(plan_text.clone());
         }
         // Plan commit ticks can hide the status row; remember whether we streamed plan output so
         // completion can restore it once stream queues are idle.

@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/plan_mode.rs
+expression: message
+---
+• No proposed plan is available in this session yet.

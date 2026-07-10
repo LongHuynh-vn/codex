@@ -25,8 +25,10 @@ pub(super) struct TranscriptState {
     /// True when rollback discarded the requested copy source because it was
     /// older than the retained copy history.
     pub(super) copy_history_evicted_by_rollback: bool,
-    /// Raw markdown of the most recently completed proposed plan.
+    /// Raw markdown of the most recently completed proposed plan in the current turn.
     pub(super) latest_proposed_plan_markdown: Option<String>,
+    /// Raw markdown of the most recently completed proposed plan in this session.
+    pub(super) last_completed_proposed_plan_markdown: Option<String>,
     /// Whether this turn already produced a copyable response.
     pub(super) saw_copy_source_this_turn: bool,
     /// Whether the next streamed assistant content should be preceded by a final message separator.

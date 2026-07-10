@@ -516,6 +516,33 @@ mod tests {
     }
 
     #[test]
+    fn plan_command_popup_mentions_show_subcommand() {
+        let mut popup = CommandPopup::new(
+            CommandPopupFlags {
+                collaboration_modes_enabled: true,
+                ..CommandPopupFlags::default()
+            },
+            Vec::new(),
+        );
+        popup.on_composer_text_change("/plan".to_string());
+
+        let width = 72;
+        let area = Rect::new(
+            /*x*/ 0,
+            /*y*/ 0,
+            width,
+            popup.calculate_required_height(width),
+        );
+        let mut buf = Buffer::empty(area);
+        popup.render_ref(area, &mut buf);
+
+        insta::assert_snapshot!(
+            "plan_command_popup_mentions_show_subcommand",
+            format!("{buf:?}")
+        );
+    }
+
+    #[test]
     fn personality_command_hidden_when_disabled() {
         let mut popup = CommandPopup::new(
             CommandPopupFlags {

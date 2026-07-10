@@ -1391,6 +1391,74 @@ async fn plan_slash_command_switches_to_plan_mode() {
 }
 
 #[tokio::test]
+async fn plan_slash_command_show_recalls_latest_plan() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+    let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
+        .expect("expected plan collaboration mode");
+    chat.set_collaboration_mask(plan_mask);
+
+    let plan_markdown = "# Approved plan\n\n- Preserve this exact step.\n- Then ship it.\n";
+    chat.on_task_started();
+    chat.on_plan_item_completed(plan_markdown.to_string());
+    let default_mask = collaboration_modes::default_mode_mask(chat.model_catalog.as_ref())
+        .expect("expected default collaboration mode");
+    chat.set_collaboration_mask(default_mask);
+    chat.on_task_complete(
+        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+    );
+    let _ = drain_insert_history(&mut rx);
+
+    chat.on_task_started();
+    assert_eq!(
+        chat.transcript.latest_proposed_plan_markdown.as_deref(),
+        None
+    );
+    assert_eq!(
+        chat.transcript
+            .last_completed_proposed_plan_markdown
+            .as_deref(),
+        Some(plan_markdown)
+    );
+    chat.on_task_complete(
+        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+    );
+    let _ = drain_insert_history(&mut rx);
+
+    chat.dispatch_command_with_args(SlashCommand::Plan, " ShOw ".to_string(), Vec::new());
+
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Default);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    let recalled = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("plan_slash_command_show_recalls_latest_plan", recalled);
+}
+
+#[tokio::test]
+async fn plan_slash_command_show_without_plan() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+    let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
+        .expect("expected plan collaboration mode");
+    chat.set_collaboration_mask(plan_mask);
+    let _ = drain_insert_history(&mut rx);
+
+    chat.dispatch_command_with_args(SlashCommand::Plan, "show".to_string(), Vec::new());
+
+    assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    let message = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("plan_slash_command_show_without_plan", message);
+}
+
+#[tokio::test]
 async fn plan_slash_command_with_args_submits_prompt_in_plan_mode() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);

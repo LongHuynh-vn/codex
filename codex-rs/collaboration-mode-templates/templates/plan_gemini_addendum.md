@@ -16,6 +16,7 @@ For the final plan:
 * Include a churn inventory for existing tests, snapshots, generated files, fixtures, and artifacts expected to change.
 * If no existing tests, snapshots, or artifacts should change, state "none" explicitly.
 * Search before saying "none"; do not infer it from memory.
+* If the user asks to see the previous plan again without requesting changes, reproduce the previous `<proposed_plan>` block verbatim; do not regenerate, rephrase, or re-plan it.
 * The `</proposed_plan>` closing tag ends your message; write nothing after it.
 
 Keep plans compact and checkable:

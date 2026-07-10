@@ -661,6 +661,23 @@ impl ChatWidget {
                 };
                 self.app_event_tx.set_thread_name(name);
             }
+            SlashCommand::Plan if trimmed.eq_ignore_ascii_case("show") => {
+                if let Some(plan_markdown) = self
+                    .transcript
+                    .last_completed_proposed_plan_markdown
+                    .clone()
+                {
+                    self.add_to_history(history_cell::new_proposed_plan(
+                        plan_markdown,
+                        &self.config.cwd,
+                    ));
+                } else {
+                    self.add_info_message(
+                        "No proposed plan is available in this session yet.".to_string(),
+                        /*hint*/ None,
+                    );
+                }
+            }
             SlashCommand::Plan if !trimmed.is_empty() => {
                 if !self.apply_plan_slash_command() {
                     return;

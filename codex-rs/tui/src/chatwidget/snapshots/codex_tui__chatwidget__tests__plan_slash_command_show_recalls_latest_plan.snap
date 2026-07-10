@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/plan_mode.rs
+expression: recalled
+---
+• Proposed Plan
+ 
+ 
+  Approved plan
+  
+  - Preserve this exact step.
+  - Then ship it.
