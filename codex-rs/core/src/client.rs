@@ -158,7 +158,7 @@ const GEMINI_OUTPUT_CONCISENESS_INSTRUCTIONS_MARKER: &str = "After creating or e
 const GEMINI_OUTPUT_CONCISENESS_INSTRUCTIONS: &str = "After creating or editing files, do not reproduce the full file contents in your reply unless the user explicitly asks to see them; the diff already shows the changes. Briefly summarize what changed in one or two sentences.";
 const GEMINI_HYBRID_SEARCH_INSTRUCTIONS_MARKER: &str = "Gemini search mode: Hybrid";
 const GEMINI_HYBRID_SEARCH_INSTRUCTIONS: &str = "Gemini search mode: Hybrid. Use built-in google:search grounding for quick freshness checks; use web_search/web_fetch when you need raw results or primary-source verification. If the user asks not to search, or freshness is unnecessary, skip search.";
-const GEMINI_APPLY_PATCH_INSTRUCTIONS: &str = r#"Gemini file edits: prefer the `apply_patch` shell command over `cat >`, `python -c`, or `sed`, especially for small in-place edits. Call the visible shell tool (`exec_command` or `shell_command`) with a heredoc such as:
+const GEMINI_APPLY_PATCH_INSTRUCTIONS: &str = r#"Gemini file edits: Use the `apply_patch` shell command for EVERY file creation and modification, regardless of file size or file count. Use `*** Add File` for new files, including long files. Never write file contents with `cat`, shell redirection or a heredoc other than the `apply_patch` invocation shown below, `echo`, `printf`, `tee`, `python -c`, or `sed -i`. If an `apply_patch` call fails, fix the patch and call `apply_patch` again; never fall back to a shell write. Call the visible shell tool (`exec_command` or `shell_command`) with a heredoc such as:
 
 apply_patch <<'PATCH'
 *** Begin Patch

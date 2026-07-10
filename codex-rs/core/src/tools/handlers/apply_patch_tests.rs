@@ -1,6 +1,10 @@
 use super::*;
 use codex_apply_patch::MaybeApplyPatchVerified;
 use codex_exec_server::LOCAL_FS;
+use codex_model_provider::create_model_provider;
+use codex_model_provider_info::GEMINI_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::protocol::FileChange;
 use core_test_support::PathBufExt;
@@ -14,6 +18,7 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 
 use crate::session::tests::make_session_and_context;
+use crate::session::turn_context::TurnContext;
 use crate::tools::context::ToolInvocation;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::PostToolUsePayload;
@@ -39,6 +44,80 @@ async fn invocation_for_payload(payload: ToolPayload) -> ToolInvocation {
         source: crate::tools::context::ToolCallSource::Direct,
         payload,
     }
+}
+
+fn use_gemini_provider(turn: &mut TurnContext) {
+    let mut provider_info = ModelProviderInfo::create_gemini_provider();
+    provider_info.experimental_bearer_token = Some("test-gemini-key".to_string());
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = GEMINI_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    turn.config = Arc::new(config);
+}
+
+fn use_responses_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = OPENAI_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+    turn.config = Arc::new(config);
+}
+
+async fn intercept_apply_patch_for_test(
+    command: &[String],
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+) -> Result<Option<FunctionToolOutput>, FunctionCallError> {
+    let turn_environment = turn
+        .environments
+        .primary()
+        .cloned()
+        .expect("test turn should have a primary environment");
+    let cwd = turn_environment.cwd.clone();
+    intercept_apply_patch(
+        command,
+        &cwd,
+        LOCAL_FS.as_ref(),
+        turn_environment,
+        session,
+        turn,
+        /*tracker*/ None,
+        "call-apply-patch",
+        "exec_command",
+    )
+    .await
+}
+
+async fn verification_error_for(command: &[String], cwd: &AbsolutePathBuf) -> String {
+    let MaybeApplyPatchVerified::CorrectnessError(error) =
+        codex_apply_patch::maybe_parse_apply_patch_verified(
+            command,
+            cwd,
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+    else {
+        panic!("expected invalid patch to fail verification");
+    };
+    format!("apply_patch verification failed: {error}")
+}
+
+fn invalid_hunk_command() -> Vec<String> {
+    vec![
+        "apply_patch".to_string(),
+        "*** Begin Patch\n*** Frobnicate File: foo\n*** End Patch".to_string(),
+    ]
+}
+
+fn unsupported_apply_patch_command() -> Vec<String> {
+    vec![
+        "zsh".to_string(),
+        "-lc".to_string(),
+        "apply_patch extra-arg <<'PATCH'\n*** Begin Patch\n*** End Patch\nPATCH".to_string(),
+    ]
 }
 
 #[tokio::test]
@@ -77,6 +156,124 @@ async fn post_tool_use_payload_uses_patch_input_and_tool_output() {
             tool_input: json!({ "command": patch }),
             tool_response: json!("Success. Updated files."),
         })
+    );
+}
+
+#[tokio::test]
+async fn intercepted_apply_patch_adds_retry_guidance_for_gemini_verification_errors() {
+    let (session, mut turn) = make_session_and_context().await;
+    use_gemini_provider(&mut turn);
+    let command = invalid_hunk_command();
+    let cwd = turn
+        .environments
+        .primary()
+        .expect("test turn should have a primary environment")
+        .cwd
+        .clone();
+    let expected = format!(
+        "{}\n\n{GEMINI_APPLY_PATCH_RETRY_GUIDANCE}",
+        verification_error_for(&command, &cwd).await
+    );
+
+    let error =
+        match intercept_apply_patch_for_test(&command, Arc::new(session), Arc::new(turn)).await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid Gemini patch should return a model error"),
+        };
+
+    assert_eq!(error, FunctionCallError::RespondToModel(expected));
+}
+
+#[tokio::test]
+async fn intercepted_apply_patch_keeps_responses_verification_errors_unchanged() {
+    let (session, mut turn) = make_session_and_context().await;
+    use_responses_provider(&mut turn);
+    let command = invalid_hunk_command();
+    let cwd = turn
+        .environments
+        .primary()
+        .expect("test turn should have a primary environment")
+        .cwd
+        .clone();
+    let expected = verification_error_for(&command, &cwd).await;
+
+    let error =
+        match intercept_apply_patch_for_test(&command, Arc::new(session), Arc::new(turn)).await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid Responses patch should return a model error"),
+        };
+
+    assert_eq!(error, FunctionCallError::RespondToModel(expected));
+}
+
+#[tokio::test]
+async fn intercepted_apply_patch_blocks_unsupported_gemini_shell_form() {
+    let (session, mut turn) = make_session_and_context().await;
+    use_gemini_provider(&mut turn);
+    let command = unsupported_apply_patch_command();
+
+    let error =
+        match intercept_apply_patch_for_test(&command, Arc::new(session), Arc::new(turn)).await {
+            Err(error) => error,
+            Ok(_) => panic!("unsupported Gemini apply_patch form should not fall through"),
+        };
+
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel(format!(
+            "apply_patch command is not in a supported form. Use the documented apply_patch heredoc form.\n\n{GEMINI_APPLY_PATCH_RETRY_GUIDANCE}"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn intercepted_apply_patch_keeps_unsupported_responses_shell_form_falling_through() {
+    let (session, mut turn) = make_session_and_context().await;
+    use_responses_provider(&mut turn);
+    let command = unsupported_apply_patch_command();
+
+    assert!(
+        intercept_apply_patch_for_test(&command, Arc::new(session), Arc::new(turn))
+            .await
+            .expect("Responses apply_patch form should fall through")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn intercepted_apply_patch_keeps_non_attempt_gemini_shell_command_falling_through() {
+    let (session, mut turn) = make_session_and_context().await;
+    use_gemini_provider(&mut turn);
+    let command = vec![
+        "zsh".to_string(),
+        "-lc".to_string(),
+        "echo apply_patch".to_string(),
+    ];
+
+    assert!(
+        intercept_apply_patch_for_test(&command, Arc::new(session), Arc::new(turn))
+            .await
+            .expect("non-apply_patch command should fall through")
+            .is_none()
+    );
+}
+
+#[test]
+fn gemini_unparsed_apply_patch_errors_are_actionable() {
+    let command = unsupported_apply_patch_command();
+    assert_eq!(
+        apply_patch_unparsed_command_error(
+            WireApi::GeminiNative,
+            &command,
+            Some("FailedToParsePatchIntoAst"),
+        ),
+        Some(format!(
+            "apply_patch command could not be parsed: FailedToParsePatchIntoAst. Use the documented apply_patch heredoc form.\n\n{GEMINI_APPLY_PATCH_RETRY_GUIDANCE}"
+        ))
+    );
+    assert_eq!(
+        apply_patch_unparsed_command_error(WireApi::Responses, &command, None),
+        None
     );
 }
 

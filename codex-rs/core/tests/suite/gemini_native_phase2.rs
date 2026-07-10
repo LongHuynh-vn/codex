@@ -331,8 +331,14 @@ async fn gemini_apply_patch_uses_exec_command_intercept() -> Result<()> {
         .as_str()
         .expect("Gemini request systemInstruction text");
     assert!(
-        instructions.contains("prefer the `apply_patch` shell command"),
-        "Gemini systemInstruction must teach apply_patch usage: {instructions}"
+        instructions.contains(
+            "Use the `apply_patch` shell command for EVERY file creation and modification"
+        ) && instructions.contains("regardless of file size or file count")
+            && instructions.contains("Use `*** Add File` for new files, including long files")
+            && instructions.contains(
+                "fix the patch and call `apply_patch` again; never fall back to a shell write"
+            ),
+        "Gemini systemInstruction must require apply_patch for every file write: {instructions}"
     );
     assert!(
         instructions.contains("apply_patch <<'PATCH'"),
@@ -348,8 +354,16 @@ async fn gemini_apply_patch_uses_exec_command_intercept() -> Result<()> {
         "Gemini systemInstruction must preserve apply_patch envelope grammar: {instructions}"
     );
     assert!(
-        instructions.contains("`cat >`, `python -c`, or `sed`"),
-        "Gemini systemInstruction must prefer apply_patch over shell writes: {instructions}"
+        instructions.contains("`cat`")
+            && instructions.contains(
+                "shell redirection or a heredoc other than the `apply_patch` invocation shown below"
+            )
+            && instructions.contains("`echo`")
+            && instructions.contains("`printf`")
+            && instructions.contains("`tee`")
+            && instructions.contains("`python -c`")
+            && instructions.contains("`sed -i`"),
+        "Gemini systemInstruction must prohibit shell file writes: {instructions}"
     );
     assert!(
         instructions.contains("After creating or editing files"),

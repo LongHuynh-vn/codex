@@ -1384,6 +1384,8 @@ struct ProposedPlanItemState {
 /// Aggregated state used only while streaming a plan-mode response.
 /// Includes per-item parsers, deferred agent message bookkeeping, and the plan item lifecycle.
 struct PlanModeStreamState {
+    /// Gemini plan mode suppresses prose outside a proposed-plan block at the display seam.
+    suppress_proposed_plan_prose: bool,
     /// Agent message items started by the model but deferred until we see non-plan text.
     pending_agent_message_items: HashMap<String, TurnItem>,
     /// Agent message items whose start notification has been emitted.
@@ -1395,8 +1397,9 @@ struct PlanModeStreamState {
 }
 
 impl PlanModeStreamState {
-    fn new(turn_id: &str) -> Self {
+    fn new(turn_id: &str, wire_api: WireApi) -> Self {
         Self {
+            suppress_proposed_plan_prose: wire_api == WireApi::GeminiNative,
             pending_agent_message_items: HashMap::new(),
             started_agent_message_items: HashSet::new(),
             leading_whitespace_by_item: HashMap::new(),
@@ -1624,8 +1627,9 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
 }
 
 /// Split the stream into normal assistant text vs. proposed plan content.
-/// Normal text becomes AgentMessage deltas; plan content becomes PlanDelta +
-/// TurnItem::Plan.
+/// Normal text becomes AgentMessage deltas except in Gemini plan mode, where it
+/// is deferred until completion so a later plan block can suppress it. Plan
+/// content becomes PlanDelta + TurnItem::Plan.
 async fn handle_plan_segments(
     sess: &Session,
     turn_context: &TurnContext,
@@ -1636,6 +1640,9 @@ async fn handle_plan_segments(
     for segment in segments {
         match segment {
             ProposedPlanSegment::Normal(delta) => {
+                if state.suppress_proposed_plan_prose {
+                    continue;
+                }
                 if delta.is_empty() {
                     continue;
                 }
@@ -1791,6 +1798,13 @@ async fn emit_agent_message_in_plan_mode(
     state: &mut PlanModeStreamState,
 ) {
     let agent_message_id = agent_message.id.clone();
+    if state.suppress_proposed_plan_prose && state.plan_item_state.started {
+        state.pending_agent_message_items.remove(&agent_message_id);
+        state.started_agent_message_items.remove(&agent_message_id);
+        state.leading_whitespace_by_item.remove(&agent_message_id);
+        return;
+    }
+
     let text = agent_message_text(&agent_message);
     if text.trim().is_empty() {
         state.pending_agent_message_items.remove(&agent_message_id);
@@ -1987,7 +2001,9 @@ async fn try_run_sampling_request(
     let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
     let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
-    let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
+    let mut plan_mode_state = plan_mode.then(|| {
+        PlanModeStreamState::new(&turn_context.sub_id, turn_context.provider.info().wire_api)
+    });
     let defer_streamed_turn_items_for_contributors =
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;

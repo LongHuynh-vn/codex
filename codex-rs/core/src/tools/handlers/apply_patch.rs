@@ -41,6 +41,7 @@ use codex_apply_patch::Hunk;
 use codex_apply_patch::StreamingPatchParser;
 use codex_exec_server::ExecutorFileSystem;
 use codex_features::Feature;
+use codex_model_provider_info::WireApi;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::protocol::EventMsg;
@@ -54,6 +55,7 @@ use codex_tools::ToolSpec;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 const APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL: Duration = Duration::from_millis(500);
+const GEMINI_APPLY_PATCH_RETRY_GUIDANCE: &str = "Fix the patch and call apply_patch again. Do not fall back to cat, tee, python, sed, or shell redirection that writes file contents.";
 /// Handles freeform `apply_patch` requests and routes verified patches to the
 /// selected environment filesystem.
 #[derive(Default)]
@@ -514,6 +516,7 @@ pub(crate) async fn intercept_apply_patch(
     call_id: &str,
     tool_name: &str,
 ) -> Result<Option<FunctionToolOutput>, FunctionCallError> {
+    let wire_api = turn.provider.info().wire_api;
     let sandbox = turn.file_system_sandbox_context(/*additional_permissions*/ None, cwd);
     match codex_apply_patch::maybe_parse_apply_patch_verified(command, cwd, fs, Some(&sandbox))
         .await
@@ -592,16 +595,111 @@ pub(crate) async fn intercept_apply_patch(
             }
         }
         codex_apply_patch::MaybeApplyPatchVerified::CorrectnessError(parse_error) => {
-            Err(FunctionCallError::RespondToModel(format!(
-                "apply_patch verification failed: {parse_error}"
-            )))
+            Err(FunctionCallError::RespondToModel(
+                apply_patch_verification_error(wire_api, &parse_error),
+            ))
         }
         codex_apply_patch::MaybeApplyPatchVerified::ShellParseError(error) => {
             tracing::trace!("Failed to parse apply_patch input, {error:?}");
-            Ok(None)
+            let parse_error = format!("{error:?}");
+            match apply_patch_unparsed_command_error(wire_api, command, Some(&parse_error)) {
+                Some(message) => Err(FunctionCallError::RespondToModel(message)),
+                None => Ok(None),
+            }
         }
-        codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => Ok(None),
+        codex_apply_patch::MaybeApplyPatchVerified::NotApplyPatch => {
+            match apply_patch_unparsed_command_error(wire_api, command, None) {
+                Some(message) => Err(FunctionCallError::RespondToModel(message)),
+                None => Ok(None),
+            }
+        }
     }
+}
+
+fn apply_patch_verification_error(
+    wire_api: WireApi,
+    parse_error: &codex_apply_patch::ApplyPatchError,
+) -> String {
+    let retry_guidance = (wire_api == WireApi::GeminiNative)
+        .then_some(GEMINI_APPLY_PATCH_RETRY_GUIDANCE)
+        .map(|guidance| format!("\n\n{guidance}"))
+        .unwrap_or_default();
+    format!("apply_patch verification failed: {parse_error}{retry_guidance}")
+}
+
+fn apply_patch_unparsed_command_error(
+    wire_api: WireApi,
+    command: &[String],
+    parse_error: Option<&str>,
+) -> Option<String> {
+    if wire_api != WireApi::GeminiNative || !is_clear_apply_patch_attempt(command) {
+        return None;
+    }
+
+    let message = match parse_error {
+        Some(error) => {
+            format!("apply_patch command could not be parsed: {error}. Use the documented apply_patch heredoc form.")
+        }
+        None => "apply_patch command is not in a supported form. Use the documented apply_patch heredoc form.".to_string(),
+    };
+    Some(format!("{message}\n\n{GEMINI_APPLY_PATCH_RETRY_GUIDANCE}"))
+}
+
+fn is_clear_apply_patch_attempt(command: &[String]) -> bool {
+    let starts_with_command = |script: &str, command_name: &str| {
+        let Some(remainder) = script.trim_start().strip_prefix(command_name) else {
+            return false;
+        };
+        match remainder.chars().next() {
+            None => true,
+            Some(ch) => !ch.is_ascii_alphanumeric() && ch != '_',
+        }
+    };
+    let starts_with_apply_patch = |script: &str| {
+        starts_with_command(script, "apply_patch") || starts_with_command(script, "applypatch")
+    };
+
+    if command
+        .first()
+        .is_some_and(|command_name| matches!(command_name.as_str(), "apply_patch" | "applypatch"))
+    {
+        return true;
+    }
+
+    let (shell, flag, script) = match command {
+        [shell, flag, script] => (shell.as_str(), flag.as_str(), script.as_str()),
+        [shell, no_profile, flag, script] if no_profile.eq_ignore_ascii_case("-noprofile") => {
+            (shell.as_str(), flag.as_str(), script.as_str())
+        }
+        _ => return false,
+    };
+    let Some(shell_name) = std::path::Path::new(shell)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+    let recognized_shell = match shell_name.as_str() {
+        "bash" | "zsh" | "sh" => matches!(flag, "-lc" | "-c"),
+        "pwsh" | "powershell" => flag.eq_ignore_ascii_case("-command"),
+        "cmd" => flag.eq_ignore_ascii_case("/c"),
+        _ => false,
+    };
+    if !recognized_shell {
+        return false;
+    }
+
+    let script = script.trim_start();
+    if starts_with_apply_patch(script) {
+        return true;
+    }
+    let Some((cd_command, apply_patch_command)) = script.split_once("&&") else {
+        return false;
+    };
+    !cd_command.contains([';', '|'])
+        && starts_with_command(cd_command, "cd")
+        && starts_with_apply_patch(apply_patch_command)
 }
 
 fn require_environment_id(
