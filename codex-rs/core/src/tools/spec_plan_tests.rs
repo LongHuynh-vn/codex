@@ -1283,8 +1283,8 @@ async fn multi_agent_v2_wait_agent_status_output_is_gemini_only() {
         Some("Timeout in milliseconds. Defaults to 120000, min 10000, max 3600000.")
     );
     assert!(
-        gemini_wait_schema["properties"].get("statuses").is_some(),
-        "Gemini wait_agent should expose status output: {gemini_wait_schema}"
+        gemini_wait_schema["properties"].get("statuses").is_none(),
+        "Gemini wait_agent must not expose the removed `statuses` property: {gemini_wait_schema}"
     );
     assert!(
         gemini_wait_schema["properties"]
