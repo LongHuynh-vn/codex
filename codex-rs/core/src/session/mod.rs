@@ -251,6 +251,8 @@ use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
+pub(crate) use self::multi_agents::GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT;
+pub(crate) use self::multi_agents::subagent_usage_hint_text_for_wire_api;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;

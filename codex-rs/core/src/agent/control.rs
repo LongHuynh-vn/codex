@@ -6,7 +6,9 @@ use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
+use crate::session::GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT;
 use crate::session::emit_subagent_session_started;
+use crate::session::subagent_usage_hint_text_for_wire_api;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::shell_snapshot::ShellSnapshot;
@@ -446,7 +448,7 @@ impl AgentControl {
             forked_rollout_items =
                 truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
         }
-        let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
+        let mut multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if let Some(parent_thread) = parent_thread.as_ref() {
                 if multi_agent_version == MultiAgentVersion::V2 {
                     let parent_config = parent_thread.codex.session.get_config().await;
@@ -477,6 +479,10 @@ impl AgentControl {
             } else {
                 Vec::new()
             };
+        if multi_agent_version == MultiAgentVersion::V2 {
+            multi_agent_v2_usage_hint_texts_to_filter
+                .push(GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT.to_string());
+        }
         let preserve_reference_context_item = matches!(fork_mode, SpawnAgentForkMode::FullHistory);
         forked_rollout_items.retain(|item| {
             keep_forked_rollout_item(item, preserve_reference_context_item)
@@ -508,7 +514,11 @@ impl AgentControl {
                 config.multi_agent_v2.subagent_usage_hint_text.clone()
             && let Some(subagent_usage_hint_message) =
                 crate::context_manager::updates::build_developer_update_item(vec![
-                    subagent_usage_hint_text,
+                    subagent_usage_hint_text_for_wire_api(
+                        config.model_provider.wire_api,
+                        &subagent_usage_hint_text,
+                    )
+                    .to_string(),
                 ])
         {
             forked_rollout_items.push(RolloutItem::ResponseItem(subagent_usage_hint_message));

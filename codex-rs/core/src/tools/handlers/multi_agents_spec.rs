@@ -34,6 +34,20 @@ pub enum ConcurrencyWording {
     GeminiEffective,
 }
 
+/// Selects how the `spawn_agent` description describes spawned-agent capabilities.
+///
+/// On the OpenAI/Responses path (and V1) spawned agents retain the legacy hierarchical
+/// description. Gemini-native spawned agents are flat workers, so the Gemini root instead
+/// receives worker-specific completion guidance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpawnedAgentCapabilityWording {
+    /// Surface the legacy hierarchical wording verbatim (OpenAI/Responses, V1).
+    #[default]
+    Raw,
+    /// Gemini: spawned agents are flat workers that complete through `complete_task`.
+    GeminiFlatWorker,
+}
+
 /// Selects how the `fork_turns` parameter description reports its omitted-field default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ForkTurnsDefaultWording {
@@ -53,6 +67,7 @@ pub struct SpawnAgentToolOptions {
     pub usage_hint_text: Option<String>,
     pub max_concurrent_threads_per_session: Option<usize>,
     pub concurrency_wording: ConcurrencyWording,
+    pub spawned_agent_capability_wording: SpawnedAgentCapabilityWording,
     pub fork_turns_default_wording: ForkTurnsDefaultWording,
 }
 
@@ -134,6 +149,7 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
             options.usage_hint_text,
             options.max_concurrent_threads_per_session,
             options.concurrency_wording,
+            options.spawned_agent_capability_wording,
         ),
         strict: false,
         defer_loading: None,
@@ -859,6 +875,7 @@ fn spawn_agent_tool_description_v2(
     usage_hint_text: Option<String>,
     max_concurrent_threads_per_session: Option<usize>,
     concurrency_wording: ConcurrencyWording,
+    spawned_agent_capability_wording: SpawnedAgentCapabilityWording,
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
@@ -877,13 +894,21 @@ fn spawn_agent_tool_description_v2(
             }
         })
         .unwrap_or_default();
+    let spawned_agent_capability_guidance = match spawned_agent_capability_wording {
+        SpawnedAgentCapabilityWording::Raw => {
+            "The spawned agent will have the same tools as you and the ability to spawn its own subagents."
+        }
+        SpawnedAgentCapabilityWording::GeminiFlatWorker => {
+            "Spawned agents are workers: they cannot spawn further sub-agents or wait on other agents, and they must finish by calling complete_task with their final report."
+        }
+    };
 
     let tool_description = format!(
         r#"
         {agent_role_guidance}
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
-The spawned agent will have the same tools as you and the ability to spawn its own subagents.
+{spawned_agent_capability_guidance}
 {inherited_model_guidance}
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.

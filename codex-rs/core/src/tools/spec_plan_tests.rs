@@ -1001,24 +1001,44 @@ async fn complete_task_tool_is_registered_for_gemini_spawned_child_only() {
         })
     }
 
-    // Gemini spawned child: complete_task is present alongside the rest of the V2 surface.
+    // Gemini spawned child: only flat-worker tools are present.
     let gemini_child = probe(|turn| {
         use_gemini_provider(turn);
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
         turn.session_source = thread_spawn_source();
     })
     .await;
-    gemini_child.assert_visible_contains(&["complete_task", "wait_agent", "spawn_agent"]);
-    gemini_child.assert_registered_contains(&["complete_task"]);
+    gemini_child.assert_visible_contains(&["complete_task", "send_message", "list_agents"]);
+    gemini_child.assert_visible_lacks(&[
+        "spawn_agent",
+        "followup_task",
+        "wait_agent",
+        "close_agent",
+    ]);
+    gemini_child.assert_registered_contains(&["complete_task", "send_message", "list_agents"]);
+    gemini_child.assert_registered_lacks(&[
+        "spawn_agent",
+        "followup_task",
+        "wait_agent",
+        "close_agent",
+    ]);
 
-    // Gemini ROOT orchestrator: the rest of the V2 surface is present, but complete_task is not.
+    // Gemini ROOT orchestrator: the full V2 orchestration surface is present, but complete_task is
+    // not.
     let gemini_root = probe(|turn| {
         use_gemini_provider(turn);
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
         // Default test session_source is a root orchestrator (SessionSource::Exec).
     })
     .await;
-    gemini_root.assert_visible_contains(&["wait_agent", "spawn_agent"]);
+    gemini_root.assert_visible_contains(&[
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "close_agent",
+        "list_agents",
+    ]);
     gemini_root.assert_visible_lacks(&["complete_task"]);
     gemini_root.assert_registered_lacks(&["complete_task"]);
 
@@ -1029,7 +1049,14 @@ async fn complete_task_tool_is_registered_for_gemini_spawned_child_only() {
         turn.session_source = thread_spawn_source();
     })
     .await;
-    responses_child.assert_visible_contains(&["wait_agent", "spawn_agent"]);
+    responses_child.assert_visible_contains(&[
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "close_agent",
+        "list_agents",
+    ]);
     responses_child.assert_visible_lacks(&["complete_task"]);
     responses_child.assert_registered_lacks(&["complete_task"]);
 }
@@ -1144,6 +1171,16 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
         gemini_description.contains(STOP_SENTENCE),
         "Gemini spawn_agent must include the STOP/anti-redo orchestration guidance: {gemini_description:?}"
     );
+    assert!(
+        gemini_description.contains(
+            "Spawned agents are workers: they cannot spawn further sub-agents or wait on other agents"
+        ),
+        "Gemini spawn_agent must describe spawned agents as flat workers: {gemini_description:?}"
+    );
+    assert!(
+        !gemini_description.contains("ability to spawn its own subagents"),
+        "Gemini spawn_agent must not promise recursive spawning: {gemini_description:?}"
+    );
 
     // The default test-harness provider is environment-dependent
     // (`default_model_provider_id` selects Gemini when GEMINI_API_KEY is set), so the
@@ -1174,6 +1211,16 @@ async fn gemini_spawn_agent_description_adds_delegation_guidance_but_non_gemini_
     assert!(
         !non_gemini_specs_json.contains(STOP_SENTENCE),
         "non-Gemini providers must not include the Gemini STOP/anti-redo guidance: {non_gemini_specs_json}"
+    );
+    let non_gemini_description = match non_gemini.visible_spec("spawn_agent") {
+        ToolSpec::Function(tool) => tool.description.as_str(),
+        other => panic!("expected spawn_agent function spec on Bedrock, got {other:?}"),
+    };
+    assert!(
+        non_gemini_description.contains(
+            "The spawned agent will have the same tools as you and the ability to spawn its own subagents."
+        ),
+        "non-Gemini spawn_agent must preserve the legacy capability wording: {non_gemini_description:?}"
     );
 }
 

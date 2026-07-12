@@ -7,6 +7,7 @@ use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
+use crate::tools::spec_plan::gemini_spawned_child;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_model_provider_info::WireApi;
 use codex_protocol::AgentPath;
@@ -53,6 +54,11 @@ async fn handle_spawn_agent(
         call_id,
         ..
     } = invocation;
+    if gemini_spawned_child(turn.as_ref()) {
+        return Err(FunctionCallError::RespondToModel(
+            "You are a spawned worker agent and cannot spawn further sub-agents. Complete your assigned task yourself and deliver your final report by calling complete_task.".to_string(),
+        ));
+    }
     session.mark_orchestration_reengaged(turn.as_ref()).await;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;

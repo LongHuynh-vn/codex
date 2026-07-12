@@ -45,6 +45,7 @@ use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::ConcurrencyWording;
 use crate::tools::handlers::multi_agents_spec::ForkTurnsDefaultWording;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
+use crate::tools::handlers::multi_agents_spec::SpawnedAgentCapabilityWording;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentV2OutputMode;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
@@ -719,7 +720,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
 /// The Gemini root orchestrator and every non-Gemini (Responses) agent never see it, so the
 /// OpenAI/Responses tool surface stays byte-identical. Uses the same spawned-child predicate as the
 /// `run_turn` completion override (`is_spawned_subagent`) so registration and override always agree.
-fn gemini_spawned_child(turn_context: &TurnContext) -> bool {
+pub(crate) fn gemini_spawned_child(turn_context: &TurnContext) -> bool {
     turn_context.provider.info().wire_api == WireApi::GeminiNative
         && matches!(
             turn_context.session_source,
@@ -731,6 +732,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
     let turn_context = context.turn_context;
     if collab_tools_enabled(turn_context) {
         if multi_agent_v2_enabled(turn_context) {
+            let is_gemini_spawned_child = gemini_spawned_child(turn_context);
             let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
                 ToolExposure::DirectModelOnly
             } else {
@@ -755,72 +757,89 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             } else {
                 turn_context.config.multi_agent_v2.usage_hint_text.clone()
             };
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(
-                    SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-                        available_models: turn_context.available_models.clone(),
-                        agent_type_description,
-                        hide_agent_type_model_reasoning: turn_context
-                            .config
-                            .multi_agent_v2
-                            .hide_spawn_agent_metadata,
-                        include_usage_hint: turn_context.config.multi_agent_v2.usage_hint_enabled,
-                        usage_hint_text,
-                        max_concurrent_threads_per_session: max_concurrent_threads_per_session(
-                            turn_context,
-                        ),
-                        concurrency_wording: if turn_context.provider.info().wire_api
-                            == WireApi::GeminiNative
-                        {
-                            ConcurrencyWording::GeminiEffective
-                        } else {
-                            ConcurrencyWording::Raw
-                        },
-                        fork_turns_default_wording: if turn_context.provider.info().wire_api
-                            == WireApi::GeminiNative
-                        {
-                            ForkTurnsDefaultWording::GeminiScoped
-                        } else {
-                            ForkTurnsDefaultWording::FullHistory
-                        },
-                    }),
-                    tool_namespace,
-                ),
-                exposure,
-            ));
+            if !is_gemini_spawned_child {
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(
+                        SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+                            available_models: turn_context.available_models.clone(),
+                            agent_type_description,
+                            hide_agent_type_model_reasoning: turn_context
+                                .config
+                                .multi_agent_v2
+                                .hide_spawn_agent_metadata,
+                            include_usage_hint: turn_context
+                                .config
+                                .multi_agent_v2
+                                .usage_hint_enabled,
+                            usage_hint_text,
+                            max_concurrent_threads_per_session: max_concurrent_threads_per_session(
+                                turn_context,
+                            ),
+                            concurrency_wording: if turn_context.provider.info().wire_api
+                                == WireApi::GeminiNative
+                            {
+                                ConcurrencyWording::GeminiEffective
+                            } else {
+                                ConcurrencyWording::Raw
+                            },
+                            spawned_agent_capability_wording: if turn_context
+                                .provider
+                                .info()
+                                .wire_api
+                                == WireApi::GeminiNative
+                            {
+                                SpawnedAgentCapabilityWording::GeminiFlatWorker
+                            } else {
+                                SpawnedAgentCapabilityWording::Raw
+                            },
+                            fork_turns_default_wording: if turn_context.provider.info().wire_api
+                                == WireApi::GeminiNative
+                            {
+                                ForkTurnsDefaultWording::GeminiScoped
+                            } else {
+                                ForkTurnsDefaultWording::FullHistory
+                            },
+                        }),
+                        tool_namespace,
+                    ),
+                    exposure,
+                ));
+            }
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace),
                 exposure,
             ));
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace),
-                exposure,
-            ));
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(
-                    WaitAgentHandlerV2::new_with_output_mode(
-                        context.wait_agent_timeouts,
-                        if turn_context.provider.info().wire_api == WireApi::GeminiNative {
-                            WaitAgentV2OutputMode::GeminiStatuses
-                        } else {
-                            WaitAgentV2OutputMode::SummaryOnly
-                        },
+            if !is_gemini_spawned_child {
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace),
+                    exposure,
+                ));
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(
+                        WaitAgentHandlerV2::new_with_output_mode(
+                            context.wait_agent_timeouts,
+                            if turn_context.provider.info().wire_api == WireApi::GeminiNative {
+                                WaitAgentV2OutputMode::GeminiStatuses
+                            } else {
+                                WaitAgentV2OutputMode::SummaryOnly
+                            },
+                        ),
+                        tool_namespace,
                     ),
-                    tool_namespace,
-                ),
-                exposure,
-            ));
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(CloseAgentHandlerV2, tool_namespace),
-                exposure,
-            ));
+                    exposure,
+                ));
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(CloseAgentHandlerV2, tool_namespace),
+                    exposure,
+                ));
+            }
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                 exposure,
             ));
             // O27 Lever 2: Gemini spawned-child-only `complete_task` (explicit completion).
             // Root orchestrator and Responses never satisfy the gate, so they never see it.
-            if gemini_spawned_child(turn_context) {
+            if is_gemini_spawned_child {
                 planned_tools.add_arc(override_tool_exposure(
                     multi_agent_v2_handler(CompleteTaskHandlerV2, tool_namespace),
                     exposure,
@@ -849,6 +868,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                         turn_context,
                     ),
                     concurrency_wording: ConcurrencyWording::Raw,
+                    spawned_agent_capability_wording: SpawnedAgentCapabilityWording::Raw,
                     fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
                 }),
                 exposure,

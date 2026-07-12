@@ -24,6 +24,7 @@ use codex_config::types::ToolSuggestDisabledTool;
 
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_models_manager::bundled_models_response;
@@ -7453,6 +7454,50 @@ async fn make_multi_agent_v2_usage_hint_test_session(
     (session, turn_context)
 }
 
+async fn make_default_multi_agent_v2_usage_hint_test_session() -> (Arc<Session>, Arc<TurnContext>) {
+    let (session, turn_context, _rx_event) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            let _ = config.features.enable(Feature::MultiAgentV2);
+        },
+    )
+    .await;
+    (session, turn_context)
+}
+
+fn use_gemini_provider_for_multi_agent_hint_test(turn_context: &mut TurnContext) {
+    let mut provider_info = ModelProviderInfo::create_gemini_provider();
+    provider_info.experimental_bearer_token = Some("test-gemini-key".to_string());
+    let mut config = (*turn_context.config).clone();
+    config.model_provider_id = codex_model_provider_info::GEMINI_PROVIDER_ID.to_string();
+    config.model_provider = provider_info.clone();
+    turn_context.provider = create_model_provider(provider_info, turn_context.auth_manager.clone());
+    turn_context.config = Arc::new(config);
+}
+
+async fn set_thread_spawn_session_source(
+    session: &Arc<Session>,
+    turn_context: &mut Arc<TurnContext>,
+) {
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(AgentPath::try_from("/root/worker").expect("agent path should parse")),
+        agent_nickname: Some("worker".to_string()),
+        agent_role: None,
+    });
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .session_source = session_source.clone();
+    Arc::get_mut(turn_context)
+        .expect("thread settings should not be shared")
+        .session_source = session_source;
+}
+
 struct PromptExtensionTestContributor;
 struct PromptExtensionTestState;
 
@@ -7584,6 +7629,103 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
     );
 }
 
+#[tokio::test]
+async fn build_initial_context_replaces_default_subagent_hint_for_gemini_spawned_child() {
+    let (session, mut turn_context) = make_default_multi_agent_v2_usage_hint_test_session().await;
+    use_gemini_provider_for_multi_agent_hint_test(
+        Arc::get_mut(&mut turn_context).expect("thread settings should not be shared"),
+    );
+    set_thread_spawn_session_source(&session, &mut turn_context).await;
+
+    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
+    let developer_messages = developer_message_texts(&initial_context);
+
+    assert!(
+        developer_messages.iter().any(|message| {
+            message.as_slice() == [GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT]
+        })
+    );
+    assert!(!developer_messages.iter().any(|message| {
+        message
+            .as_slice()
+            .iter()
+            .any(|text| text.contains("Child agents can also spawn their own sub-agents."))
+    }));
+}
+
+#[tokio::test]
+async fn build_initial_context_keeps_default_subagent_hint_for_responses_spawned_child() {
+    let (session, mut turn_context) = make_default_multi_agent_v2_usage_hint_test_session().await;
+    let default_subagent_hint = turn_context
+        .config
+        .multi_agent_v2
+        .subagent_usage_hint_text
+        .clone()
+        .expect("default subagent usage hint");
+    set_thread_spawn_session_source(&session, &mut turn_context).await;
+
+    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
+    let developer_messages = developer_message_texts(&initial_context);
+
+    assert!(
+        developer_messages
+            .iter()
+            .any(|message| message.as_slice() == [default_subagent_hint.as_str()])
+    );
+}
+
+#[tokio::test]
+async fn build_initial_context_keeps_root_hint_for_gemini_root() {
+    let (session, mut turn_context) = make_default_multi_agent_v2_usage_hint_test_session().await;
+    use_gemini_provider_for_multi_agent_hint_test(
+        Arc::get_mut(&mut turn_context).expect("thread settings should not be shared"),
+    );
+
+    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
+    let developer_messages = developer_message_texts(&initial_context);
+
+    assert!(developer_messages.iter().any(|message| {
+        message
+            .as_slice()
+            .iter()
+            .any(|text| text.contains("You are `/root`, the primary agent"))
+    }));
+    assert!(
+        !developer_messages.iter().any(|message| {
+            message.as_slice() == [GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT]
+        })
+    );
+}
+
+#[tokio::test]
+async fn build_initial_context_keeps_custom_subagent_hint_for_gemini_spawned_child() {
+    let (session, mut turn_context) = make_default_multi_agent_v2_usage_hint_test_session().await;
+    use_gemini_provider_for_multi_agent_hint_test(
+        Arc::get_mut(&mut turn_context).expect("thread settings should not be shared"),
+    );
+    {
+        let turn_context =
+            Arc::get_mut(&mut turn_context).expect("thread settings should not be shared");
+        let mut config = (*turn_context.config).clone();
+        config.multi_agent_v2.subagent_usage_hint_text = Some("Custom child guidance.".to_string());
+        turn_context.config = Arc::new(config);
+    }
+    set_thread_spawn_session_source(&session, &mut turn_context).await;
+
+    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
+    let developer_messages = developer_message_texts(&initial_context);
+
+    assert!(
+        developer_messages
+            .iter()
+            .any(|message| message.as_slice() == ["Custom child guidance."])
+    );
+    assert!(
+        !developer_messages.iter().any(|message| {
+            message.as_slice() == [GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT]
+        })
+    );
+}
 #[tokio::test]
 async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_feature_disabled() {
     let (session, turn_context) =

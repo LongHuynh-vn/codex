@@ -223,6 +223,39 @@ fn thread_spawn_source_for_test(
     })
 }
 
+#[tokio::test]
+async fn multi_agent_v2_spawn_rejects_gemini_spawned_child() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    use_gemini_provider(&mut turn);
+    turn.session_source = thread_spawn_source_for_test(ThreadId::new(), None);
+
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "delegate this",
+                "task_name": "nested_worker",
+            })),
+        ))
+        .await
+        .err()
+        .expect("Gemini spawned workers must not spawn further agents");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "You are a spawned worker agent and cannot spawn further sub-agents. Complete your assigned task yourself and deliver your final report by calling complete_task.".to_string(),
+        )
+    );
+}
 #[test]
 fn multi_agent_v2_wait_agent_effective_default_is_longer_for_gemini() {
     let config = crate::config::MultiAgentV2Config::default();

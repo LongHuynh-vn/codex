@@ -49,6 +49,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
         concurrency_wording: ConcurrencyWording::Raw,
+        spawned_agent_capability_wording: SpawnedAgentCapabilityWording::Raw,
         fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
@@ -130,6 +131,7 @@ fn spawn_agent_tool_v2_can_describe_gemini_scoped_fork_default() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: None,
         concurrency_wording: ConcurrencyWording::Raw,
+        spawned_agent_capability_wording: SpawnedAgentCapabilityWording::Raw,
         fork_turns_default_wording: ForkTurnsDefaultWording::GeminiScoped,
     });
 
@@ -161,6 +163,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: None,
         concurrency_wording: ConcurrencyWording::Raw,
+        spawned_agent_capability_wording: SpawnedAgentCapabilityWording::Raw,
         fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
@@ -215,6 +218,7 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
         concurrency_wording: ConcurrencyWording::Raw,
+        spawned_agent_capability_wording: SpawnedAgentCapabilityWording::Raw,
         fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
@@ -241,6 +245,7 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
         usage_hint_text: None,
         max_concurrent_threads_per_session: Some(4),
         concurrency_wording: ConcurrencyWording::Raw,
+        spawned_agent_capability_wording: SpawnedAgentCapabilityWording::Raw,
         fork_turns_default_wording: ForkTurnsDefaultWording::FullHistory,
     });
 
@@ -263,6 +268,31 @@ fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
     assert!(!properties.contains_key("service_tier"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(!description.contains("Available model overrides"));
+}
+
+#[test]
+fn spawn_agent_tool_v2_describes_gemini_agents_as_flat_workers() {
+    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+        available_models: Vec::new(),
+        agent_type_description: String::new(),
+        hide_agent_type_model_reasoning: false,
+        include_usage_hint: false,
+        usage_hint_text: None,
+        max_concurrent_threads_per_session: None,
+        concurrency_wording: ConcurrencyWording::GeminiEffective,
+        spawned_agent_capability_wording: SpawnedAgentCapabilityWording::GeminiFlatWorker,
+        fork_turns_default_wording: ForkTurnsDefaultWording::GeminiScoped,
+    });
+
+    let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
+        panic!("spawn_agent should be a function tool");
+    };
+
+    assert!(description.contains(
+        "Spawned agents are workers: they cannot spawn further sub-agents or wait on other agents"
+    ));
+    assert!(description.contains("finish by calling complete_task"));
+    assert!(!description.contains("ability to spawn its own subagents"));
 }
 
 #[test]

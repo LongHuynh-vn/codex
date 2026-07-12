@@ -9,6 +9,7 @@ use crate::config::ConfigBuilder;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use crate::init_state_db;
+use crate::session::GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT;
 use assert_matches::assert_matches;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -657,6 +658,14 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     }],
                     phase: None,
                 },
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT.to_string(),
+                    }],
+                    phase: None,
+                },
                 assistant_message("parent commentary", Some(MessagePhase::Commentary)),
                 assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
                 assistant_message("parent unknown phase", /*phase*/ None),
@@ -799,6 +808,58 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         "full-history forked child should not add subagent guidance when usage hints are disabled"
     );
 
+    let mut gemini_child_config = harness.config.clone();
+    let _ = gemini_child_config.features.enable(Feature::MultiAgentV2);
+    let mut gemini_provider = ModelProviderInfo::create_gemini_provider();
+    gemini_provider.experimental_bearer_token = Some("test-gemini-key".to_string());
+    gemini_child_config.model_provider_id = GEMINI_PROVIDER_ID.to_string();
+    gemini_child_config.model_provider = gemini_provider;
+    let gemini_child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            gemini_child_config,
+            text_input("Gemini child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Gemini full-history fork should succeed")
+        .thread_id;
+    let gemini_child_thread = harness
+        .manager
+        .get_thread(gemini_child_thread_id)
+        .await
+        .expect("Gemini child thread should be registered");
+    let gemini_child_history = gemini_child_thread.codex.session.clone_history().await;
+    let gemini_flat_hint_count = gemini_child_history
+        .raw_items()
+        .iter()
+        .filter(|item| match item {
+            ResponseItem::Message { role, content, .. } if role == "developer" => {
+                matches!(
+                    content.as_slice(),
+                    [ContentItem::InputText { text }]
+                        if text == GEMINI_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT
+                )
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        gemini_flat_hint_count, 1,
+        "full-history fork should filter the copied flat-worker hint before re-adding it"
+    );
+
     let expected = (
         child_thread_id,
         Op::UserInput {
@@ -830,6 +891,11 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .shutdown_live_agent(disabled_hint_child_thread_id)
         .await
         .expect("disabled-hint child shutdown should submit");
+    let _ = harness
+        .control
+        .shutdown_live_agent(gemini_child_thread_id)
+        .await
+        .expect("Gemini child shutdown should submit");
     let _ = parent_thread
         .submit(Op::Shutdown {})
         .await
