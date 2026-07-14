@@ -1262,6 +1262,19 @@ impl Session {
             let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
             Arc::clone(&active_turn.turn_state)
         };
+        // This runtime phase is reachable only after the budget state was initialized by the
+        // Gemini-native ThreadSpawn gate in `run_turn`. It therefore remains false for Responses
+        // sessions and Gemini roots. Clear the reservation before returning, just like the other
+        // post-reservation continuation guards below.
+        if self.child_token_budget_runtime.has_force_completed().await {
+            tracing::debug!(
+                thread_id = %self.thread_id,
+                "skipping goal continuation for force-completed Gemini child"
+            );
+            self.clear_reserved_goal_continuation_turn(&turn_state)
+                .await;
+            return;
+        }
         let goal_is_current = match self.state_db_for_thread_goals().await {
             Ok(Some(state_db)) => match state_db
                 .thread_goals()

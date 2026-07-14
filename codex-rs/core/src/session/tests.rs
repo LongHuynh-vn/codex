@@ -4917,6 +4917,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         input_queue: super::input_queue::InputQueue::new(),
         goal_runtime: crate::goals::GoalRuntimeState::new(),
         orchestration_runtime: crate::orchestration::OrchestrationRuntimeState::new(),
+        child_token_budget_runtime: super::child_token_budget::ChildTokenBudgetRuntimeState::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
@@ -7012,6 +7013,7 @@ where
         input_queue: super::input_queue::InputQueue::new(),
         goal_runtime: crate::goals::GoalRuntimeState::new(),
         orchestration_runtime: crate::orchestration::OrchestrationRuntimeState::new(),
+        child_token_budget_runtime: super::child_token_budget::ChildTokenBudgetRuntimeState::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
@@ -9348,6 +9350,96 @@ async fn active_goal_continuation_runs_again_after_no_tool_turn() -> anyhow::Res
         .find(|text| text.contains("<codex_internal_context source=\"goal\">"))
         .expect("goal context message should be present");
     assert!(goal_context_text.contains("Continue working toward the active thread goal."));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn force_completed_child_clears_reserved_goal_continuation_turn() -> anyhow::Result<()> {
+    let (sess, mut tc, rx, _codex_home) = make_goal_session_and_context_with_rx().await;
+    set_thread_spawn_session_source(&sess, &mut tc).await;
+    sess.child_token_budget_runtime
+        .initialize(TokenUsage::default(), /*limit*/ 100)
+        .await;
+    assert!(matches!(
+        sess.child_token_budget_runtime
+            .observe(&TokenUsage {
+                input_tokens: 100,
+                total_tokens: 100,
+                ..Default::default()
+            })
+            .await,
+        crate::session::child_token_budget::ChildTokenBudgetAction::BeginExhaustionGrace { .. }
+    ));
+    assert!(matches!(
+        sess.child_token_budget_runtime
+            .observe(&TokenUsage {
+                input_tokens: 100,
+                total_tokens: 100,
+                ..Default::default()
+            })
+            .await,
+        crate::session::child_token_budget::ChildTokenBudgetAction::ForceCompletion { .. }
+    ));
+
+    sess.set_thread_goal(
+        tc.as_ref(),
+        SetGoalRequest {
+            objective: Some("Keep improving the exhausted child task".to_string()),
+            status: None,
+            token_budget: None,
+        },
+    )
+    .await?;
+    while rx.try_recv().is_ok() {}
+
+    sess.goal_runtime_apply(GoalRuntimeEvent::MaybeContinueIfIdle)
+        .await?;
+
+    assert!(sess.active_turn.lock().await.is_none());
+    assert!(
+        timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .is_err(),
+        "force-completed child must not emit a continuation turn"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_exhausted_child_still_starts_goal_continuation_turn() -> anyhow::Result<()> {
+    let (sess, mut tc, rx, _codex_home) = make_goal_session_and_context_with_rx().await;
+    set_thread_spawn_session_source(&sess, &mut tc).await;
+    sess.child_token_budget_runtime
+        .initialize(TokenUsage::default(), /*limit*/ 100)
+        .await;
+    assert!(!sess.child_token_budget_runtime.has_force_completed().await);
+
+    sess.set_thread_goal(
+        tc.as_ref(),
+        SetGoalRequest {
+            objective: Some("Keep improving the non-exhausted child task".to_string()),
+            status: None,
+            token_budget: None,
+        },
+    )
+    .await?;
+    while rx.try_recv().is_ok() {}
+
+    sess.goal_runtime_apply(GoalRuntimeEvent::MaybeContinueIfIdle)
+        .await?;
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await?;
+            if matches!(event.msg, EventMsg::TurnStarted(_)) {
+                return anyhow::Ok(());
+            }
+        }
+    })
+    .await??;
+    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 
     Ok(())
 }

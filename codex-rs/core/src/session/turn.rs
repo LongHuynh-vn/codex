@@ -39,6 +39,7 @@ use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
+use crate::session::child_token_budget::ChildTokenBudgetAction;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::stream_events_utils::HandleOutputCtx;
@@ -137,6 +138,10 @@ const GEMINI_COMPLETE_TASK_GRACE_PROMPT: &str = "You did not call complete_task 
 const GEMINI_COMPLETE_TASK_MISSING_RESULT: &str =
     "complete_task was not called before the sub-agent turn ended.";
 
+const GEMINI_CHILD_TOKEN_BUDGET_REMINDER_PROMPT: &str = "Your delegated sub-agent token budget is nearly exhausted. Finish the current step, then call complete_task with a self-contained report of the findings gathered so far. Do not begin new research.";
+
+const GEMINI_CHILD_TOKEN_BUDGET_EXHAUSTED_PROMPT: &str = "Your delegated sub-agent token budget is exhausted. Call complete_task NOW with a self-contained report of the findings gathered so far. Do not call any other tools, do not use send_message, and do not continue researching.";
+
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
 ///
@@ -159,6 +164,36 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> Option<String> {
+    let wire_api = turn_context.provider.info().wire_api;
+    let is_spawned_subagent = matches!(
+        &turn_context.session_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+    );
+    if wire_api == WireApi::GeminiNative && is_spawned_subagent {
+        let baseline = sess.total_token_usage().await.unwrap_or_default();
+        sess.child_token_budget_runtime
+            .initialize(
+                baseline,
+                turn_context.config.multi_agent_v2.child_token_budget,
+            )
+            .await;
+        if sess.child_token_budget_runtime.has_force_completed().await {
+            let (spent, limit) =
+                forced_child_token_budget_usage(sess.as_ref(), turn_context.as_ref()).await;
+            return Some(
+                render_forced_child_token_budget_completion(
+                    sess.as_ref(),
+                    turn_context.as_ref(),
+                    spent,
+                    limit,
+                    /*terminal_last_agent_message*/ None,
+                    /*fallback_last_agent_message*/ None,
+                )
+                .await,
+            );
+        }
+    }
+
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -212,11 +247,6 @@ pub(crate) async fn run_turn(
 
     let mut last_agent_message: Option<String> = None;
     let mut last_non_empty_sampling_request_last_agent_message: Option<String> = None;
-    let wire_api = turn_context.provider.info().wire_api;
-    let is_spawned_subagent = matches!(
-        &turn_context.session_source,
-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-    );
     let mut stop_hook_active = false;
     // Counts one-shot complete_task grace prompts for this Gemini spawned-subagent turn. Resets per
     // `run_turn`, so it is model-undefeatable and cannot loop.
@@ -274,6 +304,12 @@ pub(crate) async fn run_turn(
         let turn_metadata_header = turn_context
             .turn_metadata_state
             .current_header_value_for_model_request(&window_id);
+        let budget_exhaustion_grace_in_flight = wire_api == WireApi::GeminiNative
+            && is_spawned_subagent
+            && sess
+                .child_token_budget_runtime
+                .exhaustion_grace_in_flight()
+                .await;
         match run_sampling_request(
             Arc::clone(&sess),
             Arc::clone(&turn_context),
@@ -284,7 +320,7 @@ pub(crate) async fn run_turn(
             sampling_request_input.clone(),
             // The complete_task grace turn must finalize from already gathered work, not continue
             // grounded research.
-            gemini_complete_task_grace_attempts > 0,
+            gemini_complete_task_grace_attempts > 0 || budget_exhaustion_grace_in_flight,
             cancellation_token.child_token(),
         )
         .await
@@ -312,6 +348,80 @@ pub(crate) async fn run_turn(
                         sampling_request_last_agent_message.clone();
                 }
                 can_drain_pending_input = true;
+
+                if wire_api == WireApi::GeminiNative && is_spawned_subagent {
+                    let current_usage = sess.total_token_usage().await.unwrap_or_default();
+                    match sess
+                        .child_token_budget_runtime
+                        .observe(&current_usage)
+                        .await
+                    {
+                        ChildTokenBudgetAction::None => {}
+                        ChildTokenBudgetAction::Reminder {
+                            spent,
+                            remaining,
+                            limit,
+                        } => {
+                            tracing::debug!(
+                                thread_id = %sess.thread_id,
+                                turn_id = %turn_context.sub_id,
+                                spent_tokens = spent,
+                                remaining_tokens = remaining,
+                                budget_limit = limit,
+                                "gemini child token budget reminder fired"
+                            );
+                            let reminder = user_message(GEMINI_CHILD_TOKEN_BUDGET_REMINDER_PROMPT);
+                            sess.record_conversation_items(
+                                &turn_context,
+                                std::slice::from_ref(&reminder),
+                            )
+                            .await;
+                            continue;
+                        }
+                        ChildTokenBudgetAction::BeginExhaustionGrace { spent, limit } => {
+                            if let Some(report) =
+                                last_non_empty_sampling_request_last_agent_message.as_ref()
+                            {
+                                recovered_gemini_child_report_before_grace = Some(report.clone());
+                            }
+                            tracing::debug!(
+                                thread_id = %sess.thread_id,
+                                turn_id = %turn_context.sub_id,
+                                spent_tokens = spent,
+                                remaining_tokens = 0,
+                                budget_limit = limit,
+                                "gemini child token budget exhausted"
+                            );
+                            let exhausted =
+                                user_message(GEMINI_CHILD_TOKEN_BUDGET_EXHAUSTED_PROMPT);
+                            sess.record_conversation_items(
+                                &turn_context,
+                                std::slice::from_ref(&exhausted),
+                            )
+                            .await;
+                            continue;
+                        }
+                        ChildTokenBudgetAction::ForceCompletion { spent, limit } => {
+                            last_agent_message = Some(
+                                render_forced_child_token_budget_completion(
+                                    sess.as_ref(),
+                                    turn_context.as_ref(),
+                                    spent,
+                                    limit,
+                                    sampling_request_last_agent_message,
+                                    recovered_gemini_child_report_before_grace.clone().or_else(
+                                        || {
+                                            last_non_empty_sampling_request_last_agent_message
+                                                .clone()
+                                        },
+                                    ),
+                                )
+                                .await,
+                            );
+                            break;
+                        }
+                    }
+                }
                 let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
                 let token_status =
@@ -374,18 +484,11 @@ pub(crate) async fn run_turn(
                 if !needs_follow_up {
                     let send_message_to_root_fallback =
                         if wire_api == WireApi::GeminiNative && is_spawned_subagent {
-                            match sess
-                                .input_queue
-                                .turn_state_for_sub_id(&sess.active_turn, &turn_context.sub_id)
-                                .await
-                            {
-                                Some(turn_state) => turn_state
-                                    .lock()
-                                    .await
-                                    .gemini_spawned_subagent_last_send_message_to_root
-                                    .clone(),
-                                None => None,
-                            }
+                            spawned_child_send_message_to_root_fallback(
+                                sess.as_ref(),
+                                turn_context.as_ref(),
+                            )
+                            .await
                         } else {
                             None
                         };
@@ -401,14 +504,7 @@ pub(crate) async fn run_turn(
                             recovered_gemini_child_report_before_grace = Some(report.clone());
                         }
                         if gemini_complete_task_grace_attempts < MAX_GEMINI_COMPLETE_TASK_GRACE {
-                            let reprompt = ResponseItem::Message {
-                                id: None,
-                                role: "user".to_string(),
-                                content: vec![ContentItem::InputText {
-                                    text: GEMINI_COMPLETE_TASK_GRACE_PROMPT.to_string(),
-                                }],
-                                phase: None,
-                            };
+                            let reprompt = user_message(GEMINI_COMPLETE_TASK_GRACE_PROMPT);
                             sess.record_conversation_items(
                                 &turn_context,
                                 std::slice::from_ref(&reprompt),
@@ -473,6 +569,25 @@ pub(crate) async fn run_turn(
                     break;
                 }
                 continue;
+            }
+            Err(e) if budget_exhaustion_grace_in_flight && !matches!(&e, CodexErr::TurnAborted) => {
+                info!("Budget exhaustion grace sampling error: {e:#}");
+                let (spent, limit) =
+                    forced_child_token_budget_usage(sess.as_ref(), turn_context.as_ref()).await;
+                last_agent_message = Some(
+                    render_forced_child_token_budget_completion(
+                        sess.as_ref(),
+                        turn_context.as_ref(),
+                        spent,
+                        limit,
+                        /*terminal_last_agent_message*/ None,
+                        recovered_gemini_child_report_before_grace
+                            .clone()
+                            .or_else(|| last_non_empty_sampling_request_last_agent_message.clone()),
+                    )
+                    .await,
+                );
+                break;
             }
             Err(CodexErr::TurnAborted) => {
                 // Aborted turn is reported via a different event.
@@ -1322,6 +1437,85 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+}
+
+fn user_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+    }
+}
+
+async fn spawned_child_send_message_to_root_fallback(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> Option<String> {
+    let turn_state = sess
+        .input_queue
+        .turn_state_for_sub_id(&sess.active_turn, &turn_context.sub_id)
+        .await?;
+    turn_state
+        .lock()
+        .await
+        .gemini_spawned_subagent_last_send_message_to_root
+        .clone()
+}
+
+async fn render_forced_child_token_budget_completion(
+    sess: &Session,
+    turn_context: &TurnContext,
+    spent: i64,
+    limit: i64,
+    terminal_last_agent_message: Option<String>,
+    fallback_last_agent_message: Option<String>,
+) -> String {
+    let send_message_to_root_fallback =
+        spawned_child_send_message_to_root_fallback(sess, turn_context).await;
+    let recovered_report = terminal_last_agent_message
+        .or(fallback_last_agent_message)
+        .or(send_message_to_root_fallback);
+    let mut forced_result = format!(
+        "Child token budget exhausted after {spent} weighted tokens (limit {limit}) before complete_task was called."
+    );
+    if let Some(report) = recovered_report {
+        forced_result.push_str("\n\nFindings gathered before forced completion:\n");
+        forced_result.push_str(&report);
+    }
+    tracing::debug!(
+        thread_id = %sess.thread_id,
+        turn_id = %turn_context.sub_id,
+        spent_tokens = spent,
+        remaining_tokens = 0,
+        budget_limit = limit,
+        "gemini child token budget forced completion"
+    );
+    render_complete_task_result(CompleteTaskResult::new(
+        CompleteTaskStatus::Failed,
+        &forced_result,
+    ))
+}
+
+async fn forced_child_token_budget_usage(sess: &Session, turn_context: &TurnContext) -> (i64, i64) {
+    let current_usage = sess.total_token_usage().await.unwrap_or_default();
+    match sess
+        .child_token_budget_runtime
+        .observe(&current_usage)
+        .await
+    {
+        ChildTokenBudgetAction::ForceCompletion { spent, limit } => (spent, limit),
+        action => {
+            warn!(
+                ?action,
+                "forced child budget completion observed an unexpected runtime phase"
+            );
+            let limit = turn_context.config.multi_agent_v2.child_token_budget.max(0);
+            (limit, limit)
+        }
+    }
 }
 
 fn effective_turn_last_agent_message(

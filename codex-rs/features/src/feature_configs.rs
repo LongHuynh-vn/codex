@@ -13,6 +13,9 @@ pub struct MultiAgentV2ConfigToml {
     #[schemars(range(min = 1))]
     pub max_concurrent_threads_per_session: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub child_token_budget: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 3600000))]
     pub min_wait_timeout_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

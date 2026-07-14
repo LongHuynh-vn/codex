@@ -89,11 +89,15 @@ const GEMINI_MISSING_COMPLETE_TASK_FAILURE: &str =
 /// Distinctive verbatim fragment of the complete_task grace prompt injected by `run_turn`.
 /// A request body containing it proves the one-shot grace turn fired.
 const GEMINI_COMPLETE_TASK_GRACE_MARKER: &str = "You did not call complete_task";
+const GEMINI_CHILD_TOKEN_BUDGET_REMINDER_MARKER: &str =
+    "Your delegated sub-agent token budget is nearly exhausted";
+const GEMINI_CHILD_TOKEN_BUDGET_EXHAUSTED_MARKER: &str =
+    "Your delegated sub-agent token budget is exhausted";
 // O27 Lever 2 fixtures: complete_task bounds child results at source.
 /// Embedded once in the oversized report so we can assert the verbatim report is/ isn't forwarded.
 const LARGE_REPORT_VERBATIM_SENTINEL: &str = "LARGE_REPORT_VERBATIM_SENTINEL";
 
-fn body_contains(req: &wiremock::Request, text: &str) -> bool {
+pub(super) fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     let is_zstd = req
         .headers
         .get("content-encoding")
@@ -116,7 +120,7 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
 /// Counts how many times `text` appears in the (possibly zstd-compressed) request body.
 /// O27: the complete_task grace prompt is recorded into the child's history, so the grace request
 /// carries the marker once.
-fn body_marker_count(req: &wiremock::Request, text: &str) -> usize {
+pub(super) fn body_marker_count(req: &wiremock::Request, text: &str) -> usize {
     let is_zstd = req
         .headers
         .get("content-encoding")
@@ -359,7 +363,7 @@ async fn wait_for_hook_log(
     }
 }
 
-async fn wait_for_spawned_thread_id(test: &TestCodex) -> Result<String> {
+pub(super) async fn wait_for_spawned_thread_id(test: &TestCodex) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let ids = test.thread_manager.list_thread_ids().await;
@@ -1217,6 +1221,8 @@ async fn gemini_spawned_child_complete_task_becomes_the_completion() -> Result<(
             .features
             .enable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
+        // The complete_task result must win even when this response crosses the child budget.
+        config.multi_agent_v2.child_token_budget = 1;
     }))
     .await?;
     let server = harness.server();
@@ -1561,7 +1567,10 @@ async fn gemini_spawned_child_missing_complete_task_synthesizes_recovered_report
 async fn gemini_root_empty_turn_does_not_get_complete_task_grace() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = TestCodexHarness::with_builder(mock_gemini_builder()).await?;
+    let harness = TestCodexHarness::with_builder(mock_gemini_builder().with_config(|config| {
+        config.multi_agent_v2.child_token_budget = 1;
+    }))
+    .await?;
     let server = harness.server();
     let root = mount_gemini_sse_once_match(
         server,
@@ -1578,6 +1587,9 @@ async fn gemini_root_empty_turn_does_not_get_complete_task_grace() -> Result<()>
         1,
         "a non-spawned (root) Gemini empty turn must not trigger the spawned-subagent grace prompt"
     );
+    let request_body = root.requests()[0].to_string();
+    assert!(!request_body.contains(GEMINI_CHILD_TOKEN_BUDGET_REMINDER_MARKER));
+    assert!(!request_body.contains(GEMINI_CHILD_TOKEN_BUDGET_EXHAUSTED_MARKER));
 
     Ok(())
 }
@@ -1638,6 +1650,7 @@ async fn responses_spawned_child_empty_turn_does_not_get_complete_task_grace() -
                 .expect("test config should allow feature update");
             config.model = Some(INHERITED_MODEL.to_string());
             config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
+            config.multi_agent_v2.child_token_budget = 1;
         })
         .build(&server)
         .await?;
@@ -1666,11 +1679,12 @@ async fn responses_spawned_child_empty_turn_does_not_get_complete_task_grace() -
     // the parent's, so an exact request count is not a reliable signal here — assert on the
     // grace marker instead.)
     assert!(
-        child_mock
-            .requests()
-            .iter()
-            .all(|req| !req.body_contains_text(GEMINI_COMPLETE_TASK_GRACE_MARKER)),
-        "the Gemini complete_task grace prompt must never reach a Responses spawned child"
+        child_mock.requests().iter().all(|req| {
+            !req.body_contains_text(GEMINI_COMPLETE_TASK_GRACE_MARKER)
+                && !req.body_contains_text(GEMINI_CHILD_TOKEN_BUDGET_REMINDER_MARKER)
+                && !req.body_contains_text(GEMINI_CHILD_TOKEN_BUDGET_EXHAUSTED_MARKER)
+        }),
+        "Gemini-only complete_task and child-budget prompts must never reach a Responses spawned child"
     );
 
     Ok(())

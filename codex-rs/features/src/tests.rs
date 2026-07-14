@@ -553,6 +553,7 @@ fn multi_agent_v2_feature_config_deserializes_table() {
 [multi_agent_v2]
 enabled = true
 max_concurrent_threads_per_session = 4
+child_token_budget = 500000
 min_wait_timeout_ms = 2500
 max_wait_timeout_ms = 120000
 default_wait_timeout_ms = 30000
@@ -576,6 +577,7 @@ non_code_mode_only = true
         Some(crate::FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: Some(true),
             max_concurrent_threads_per_session: Some(4),
+            child_token_budget: Some(500_000),
             min_wait_timeout_ms: Some(2500),
             max_wait_timeout_ms: Some(120000),
             default_wait_timeout_ms: Some(30000),
@@ -615,6 +617,7 @@ usage_hint_enabled = false
         Some(crate::FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: None,
             max_concurrent_threads_per_session: None,
+            child_token_budget: None,
             min_wait_timeout_ms: None,
             max_wait_timeout_ms: None,
             default_wait_timeout_ms: None,

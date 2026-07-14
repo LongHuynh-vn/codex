@@ -197,6 +197,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod child_token_budget;
 mod config_lock;
 mod handlers;
 mod inject;

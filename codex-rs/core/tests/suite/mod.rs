@@ -51,6 +51,7 @@ mod deprecation_notice;
 mod exec;
 mod exec_policy;
 mod fork_thread;
+mod gemini_child_token_budget;
 mod gemini_native_phase2;
 mod gemini_native_phase4;
 mod gemini_plan_mode;

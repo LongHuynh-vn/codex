@@ -3,6 +3,7 @@ use super::*;
 use crate::config::ConstraintError;
 use crate::goals::GoalRuntimeState;
 use crate::orchestration::OrchestrationRuntimeState;
+use crate::session::child_token_budget::ChildTokenBudgetRuntimeState;
 use crate::skills::SkillError;
 use crate::state::ActiveTurn;
 use codex_protocol::SessionId;
@@ -39,6 +40,7 @@ pub(crate) struct Session {
     pub(crate) input_queue: InputQueue,
     pub(crate) goal_runtime: GoalRuntimeState,
     pub(crate) orchestration_runtime: OrchestrationRuntimeState,
+    pub(crate) child_token_budget_runtime: ChildTokenBudgetRuntimeState,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) next_internal_sub_id: AtomicU64,
@@ -1087,6 +1089,7 @@ impl Session {
                 input_queue: InputQueue::new(),
                 goal_runtime: GoalRuntimeState::new(),
                 orchestration_runtime: OrchestrationRuntimeState::new(),
+                child_token_budget_runtime: ChildTokenBudgetRuntimeState::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 next_internal_sub_id: AtomicU64::new(0),
